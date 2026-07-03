@@ -1,0 +1,12 @@
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+
+*.log
+.env
+.env.*
+
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,62 @@
+/* Design tokens — inspired by robot-analyzer-js / ERMINE workbench */
+:root {
+  /* Background layers */
+  --color-bg-primary: #0d0d12;
+  --color-bg-secondary: #13131c;
+  --color-bg-tertiary: #1a1a26;
+  --color-bg-elevated: #22222f;
+  --color-bg-glass: rgba(26, 26, 38, 0.82);
+
+  /* Text */
+  --color-text-primary: #ececf4;
+  --color-text-secondary: #9b9bb8;
+  --color-text-muted: #6b6b88;
+  --color-text-accent: #7eb8ff;
+
+  /* Borders */
+  --color-border: #2e2e42;
+  --color-border-subtle: #242436;
+  --color-border-focus: #4a7fd4;
+
+  /* Accent */
+  --color-accent: #4a8af4;
+  --color-accent-hover: #5c9aff;
+  --color-accent-muted: rgba(74, 138, 244, 0.15);
+
+  /* Status */
+  --color-status-idle: #6b6b88;
+  --color-status-idle-bg: #2a2a3a;
+  --color-status-loading: #7eb8ff;
+  --color-status-loading-bg: rgba(74, 138, 244, 0.18);
+  --color-status-ready: #5dd39e;
+  --color-status-ready-bg: rgba(93, 211, 158, 0.14);
+  --color-status-running: #f2c94c;
+  --color-status-running-bg: rgba(242, 201, 76, 0.14);
+  --color-status-error: #ff8a8a;
+  --color-status-error-bg: rgba(255, 138, 138, 0.14);
+
+  /* Semantic */
+  --color-success: #5dd39e;
+  --color-warning: #f2c94c;
+  --color-error: #ff8a8a;
+
+  /* Layout */
+  --sidebar-width: 300px;
+  --topbar-height: 48px;
+  --bottom-panel-default: 200px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-panel: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --shadow-glow: 0 0 20px rgba(74, 138, 244, 0.08);
+
+  /* Motion */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+
+  /* Typography */
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background: var(--color-bg-primary);
+}

@@ -1,0 +1,38 @@
+{
+  "name": "arm-dynamics-sim-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@mujoco/mujoco": "^3.10.0",
+    "@react-three/drei": "^9.117.3",
+    "@react-three/fiber": "^8.17.10",
+    "closed-chain-ik": "^0.0.3",
+    "jszip": "^3.10.1",
+    "pinocchio-js": "^1.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.170.0",
+    "uplot": "^1.6.32",
+    "urdf-loader": "^0.12.6",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/jszip": "^3.4.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.170.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "happy-dom": "^20.10.6",
+    "typescript": "~5.6.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.0.0"
+  }
+}

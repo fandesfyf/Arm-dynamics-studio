@@ -1,0 +1,188 @@
+.floating-panel {
+  position: fixed;
+  width: 320px;
+  min-width: 280px;
+  max-width: 400px;
+  background: var(--color-bg-glass);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-left: 3px solid var(--panel-accent, var(--color-accent));
+  will-change: transform;
+}
+
+.floating-panel-expanded {
+  height: min(520px, calc(100vh - 96px));
+}
+
+.floating-panel-collapsed,
+.floating-panel-minimized {
+  height: 48px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border-bottom: 1px solid var(--color-border);
+  cursor: move;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.panel-icon {
+  font-size: 16px;
+}
+
+.panel-title-text {
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.panel-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-control-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.panel-control-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--color-text-primary);
+}
+
+.panel-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-content-inner {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+}
+
+.panel-dock {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 999;
+}
+
+.docked-panel {
+  width: 200px;
+  height: 44px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+.docked-panel:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.docked-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.docked-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.docked-btn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.docked-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--color-text-primary);
+}
+
+.panel-launcher {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  width: 160px;
+  z-index: 1001;
+  background: var(--color-bg-glass);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+
+.panel-launcher-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px !important;
+}
+
+.floating-panel .panel-section {
+  margin-bottom: 0;
+}
+
+.floating-panel .panel-section h3 {
+  font-size: 0.85rem;
+  margin: 0 0 8px;
+}
+
+.floating-panel .joint-grid {
+  max-height: 280px;
+  overflow-y: auto;
+}
