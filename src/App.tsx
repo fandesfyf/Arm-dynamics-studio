@@ -87,37 +87,66 @@ export default function App() {
     [solveEeIkLive, resetReferencePose, commitEeGizmoDrag],
   );
 
+  const handleAddMotionTarget = useCallback(async () => {
+    const result = await addMotionTarget();
+    if (!result.ok) {
+      useSessionStore.getState().setSimStatus('error', result.message ?? '添加目标失败');
+    }
+  }, [addMotionTarget]);
+
   useEffect(() => () => dispose(), [dispose]);
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'Space' && e.key !== ' ') return;
+    const isTypingTarget = (target: HTMLElement | null) => {
+      if (!target) return false;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return true;
+      return target.isContentEditable;
+    };
 
-      const target = e.target as HTMLElement | null;
-      if (target) {
-        const tag = target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return;
-        if (target.isContentEditable) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target as HTMLElement | null)) return;
+
+      if (e.code === 'Space' || e.key === ' ') {
+        const state = useSessionStore.getState();
+        const transportDisabled =
+          state.loading ||
+          !state.robotInfo ||
+          (state.simStatus !== 'running' && state.simStatus !== 'ready');
+        if (transportDisabled) return;
+
+        e.preventDefault();
+        if (state.simStatus === 'running') {
+          stopSimulation();
+        } else {
+          void startSimulation();
+        }
+        return;
       }
 
-      const state = useSessionStore.getState();
-      const transportDisabled =
-        state.loading ||
-        !state.robotInfo ||
-        (state.simStatus !== 'running' && state.simStatus !== 'ready');
-      if (transportDisabled) return;
+      if (e.key === 'f' || e.key === 'F') {
+        const state = useSessionStore.getState();
+        if (state.controlMode !== 'interpolate') return;
+        if (state.loading || !state.robotInfo || state.interpolationActive) return;
 
-      e.preventDefault();
-      if (state.simStatus === 'running') {
-        stopSimulation();
-      } else {
-        void startSimulation();
+        e.preventDefault();
+        void executeMotionTargets();
+        return;
+      }
+
+      if (e.key === 'k' || e.key === 'K') {
+        const state = useSessionStore.getState();
+        if (state.controlMode !== 'interpolate') return;
+        if (state.loading || !state.robotInfo || state.interpolationActive) return;
+
+        e.preventDefault();
+        void handleAddMotionTarget();
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [startSimulation, stopSimulation]);
+  }, [executeMotionTargets, handleAddMotionTarget, startSimulation, stopSimulation]);
 
   const defaultLoadedRef = useRef(false);
   useEffect(() => {
@@ -153,8 +182,8 @@ export default function App() {
   const pauseDisabled = loading || !robotInfo || !running;
   const pauseLabel = isPaused ? '▶ 继续' : '⏸ 暂停';
   const transportTitle = running
-    ? '停止仿真'
-    : '开始仿真';
+    ? '停止仿真 (Space)'
+    : '开始仿真 (Space)';
 
   const handleTransport = () => {
     if (transportDisabled) return;
@@ -189,13 +218,6 @@ export default function App() {
       robotInfo,
     ],
   );
-
-  const handleAddMotionTarget = useCallback(async () => {
-    const result = await addMotionTarget();
-    if (!result.ok) {
-      useSessionStore.getState().setSimStatus('error', result.message ?? '添加目标失败');
-    }
-  }, [addMotionTarget]);
 
   const rightPanels = useMemo(
     () => ({

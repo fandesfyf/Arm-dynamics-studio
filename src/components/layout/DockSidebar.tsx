@@ -68,7 +68,15 @@ export function DockSidebar({ side, panels, transport }: DockSidebarProps) {
             title={transport.title}
             aria-label={transport.title}
           >
-            {transport.running ? '⏹ 停止仿真' : '▶ 开始仿真'}
+            {transport.running ? (
+              <>
+                ⏹ 停止仿真 <kbd className="btn-kbd">Space</kbd>
+              </>
+            ) : (
+              <>
+                ▶ 开始仿真 <kbd className="btn-kbd">Space</kbd>
+              </>
+            )}
           </button>
           {transport.onPause && transport.running && (
             <button

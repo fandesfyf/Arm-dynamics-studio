@@ -233,16 +233,30 @@ export function ControlPanel({
               className="btn btn-ghost"
               onClick={() => void handleAddTarget()}
               disabled={disabled || interpolationActive || addTargetBusy}
+              title="将当前目标加入队列 (K)"
             >
-              {addTargetBusy ? '添加中…' : '添加目标'}
+              {addTargetBusy ? (
+                '添加中…'
+              ) : (
+                <>
+                  添加目标 <kbd className="btn-kbd">K</kbd>
+                </>
+              )}
             </button>
             <button
               type="button"
               className="primary"
               onClick={onExecuteMotionTargets}
               disabled={disabled || interpolationActive}
+              title="执行插值运动 (F)"
             >
-              {interpolationActive ? '插值中…' : '执行'}
+              {interpolationActive ? (
+                '插值中…'
+              ) : (
+                <>
+                  执行 <kbd className="btn-kbd">F</kbd>
+                </>
+              )}
             </button>
           </div>
           <CollapsibleSection
