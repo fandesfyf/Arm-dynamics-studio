@@ -1,14 +1,27 @@
 # Arm Dynamics Studio
 
-浏览器端 URDF 单臂动力学仿真工具。基于 MuJoCo WASM 物理步进与 pinocchio-js 运动学/IK，纯前端静态部署，无需后端服务。
+浏览器端 URDF 机械臂/双臂动力学仿真工具。基于 MuJoCo WASM 物理步进与 pinocchio-js 运动学/IK，纯前端静态部署，无需后端服务。
 
 ## 目录
 
 - [功能概览](#功能概览)
+- [界面布局](#界面布局)
+- [快速上手](#快速上手)
+- [面板说明](#面板说明)
+  - [左侧：模型](#左侧模型)
+  - [左侧：仿真](#左侧仿真)
+  - [左侧：仿真传输](#左侧仿真传输)
+  - [中央：三维视口](#中央三维视口)
+  - [右侧：控制](#右侧控制)
+  - [右侧：负载](#右侧负载)
+  - [右侧：可视化](#右侧可视化)
+  - [底部：曲线](#底部曲线)
+- [典型工作流](#典型工作流)
+- [快捷键](#快捷键)
 - [技术栈](#技术栈)
 - [环境要求](#环境要求)
-- [快速开始](#快速开始)
-- [构建与测试](#构建与测试)
+- [开发与构建](#开发与构建)
+- [Cloudflare Workers 部署](#cloudflare-workers-部署)
 - [项目结构](#项目结构)
 - [许可证](#许可证)
 
@@ -16,16 +29,231 @@
 
 | 能力 | 说明 |
 |------|------|
-| URDF / ZIP 导入 | 上传 `.urdf` 或含 mesh 的 `.zip`，写入 MuJoCo VFS 后加载 |
-| 内置 test_arm | 一键加载 kuavo `biped_v3_arm`（`public/robots/test_arm.zip`，含 STL mesh） |
-| 3D 可视化 | Three.js + urdf-loader 实时显示关节状态 |
-| 动力学仿真 | `mj_step` 积分，`mj_inverse` 前馈 + PD 反馈 |
-| 关节角目标 | 平滑插值到达目标角，自动停止 |
-| 末端 XYZ 目标 | pinocchio DLS IK → 关节驱动 |
-| 轨迹关键点 | ≥2 个关键点 CubicSpline + SLERP 插值播放 |
-| 质量 / 惯量编辑 | 修改 link 惯性参数后重建模型 |
-| 实时曲线 | uPlot：指令（虚线）vs 实际（实线），q / v / τ |
-| CSV 导出 | 时序数据列格式对齐旧版 Python 桌面版 |
+| URDF / ZIP 导入 | 拖放或选择 `.zip` / 文件夹 / 单文件 `.urdf`；多 URDF 时下拉选择 |
+| 内置 test_arm | kuavo `biped_v3_arm` 双臂模型（`test_arm.zip`，含 STL mesh） |
+| 3D 可视化 | Three.js 实时 mesh + 参考姿态（TF / 幽灵模型） |
+| 动力学仿真 | MuJoCo `mj_step` + 逆动力学前馈 + 关节 PD |
+| 关节 / 末端控制 | 滑条目标、插值队列、Gizmo 拖拽 IK |
+| 负载与外力 | 球体负载、URDF 片段拼接、link 6D 外力 |
+| 实时曲线 | 关节 q / v / τ 与末端位姿；指令虚线 vs 实际实线 |
+| CSV 导出 | 时序数据，列格式对齐旧版 Python 桌面版 |
+
+## 界面布局
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 顶栏：模型名 · DOF · 基座 · 仿真状态 · IK 状态 · 仿真时间        │
+│ 菜单「视图」：切换左/右/底部面板焦点与显隐                        │
+├──────────┬──────────────────────────────────────┬───────────────┤
+│ 左侧面板  │         中央三维视口                  │  右侧面板      │
+│ · 模型    │  URDF mesh、参考 TF、末端 Gizmo、      │ · 控制        │
+│ · 仿真    │  运动目标标记、外力标记               │ · 负载        │
+│          │                                      │ · 可视化      │
+│ ▶开始仿真 │                                      │               │
+│ ⏸暂停    │                                      │               │
+├──────────┴──────────────────────────────────────┴───────────────┤
+│ 底部：实时曲线（位置 / 速度 / 力矩 / 末端）· 录制与 CSV 导出      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+侧栏宽度、底部曲线高度可拖拽调整，尺寸会保存到浏览器 `localStorage`。
+
+## 快速上手
+
+```bash
+npm install
+npm run dev
+```
+
+浏览器打开终端提示的地址（默认 `http://localhost:5173`）。
+
+1. 等待默认模型加载（**线上**：`test_arm` 双臂；**本地开发**：`biped_s70_upper_body`，需本机 biped mesh）。
+2. 左栏点击 **▶ 开始仿真**，观察三维模型与底部曲线。
+3. 右栏 **控制** 面板拖动关节滑条或切换 **末端** 层拖动 Gizmo。
+4. 再次点击传输按钮 **停止仿真**（曲线数据保留，可继续导出）。
+
+## 面板说明
+
+### 左侧：模型
+
+**模型加载**
+
+| 操作 | 说明 |
+|------|------|
+| 加载 test_arm | 加载内置 kuavo 双臂测试包 |
+| 选择 ZIP | 仅 `.zip`；包内多个 URDF 时出现下拉列表 |
+| 选择文件夹 | 递归包含子目录中的 URDF |
+| 拖放 | 支持文件夹 / ZIP / 单 URDF 到加载区 |
+
+加载成功后显示：模型名、固定基座、DOF、末端位置。
+
+| 操作 | 说明 |
+|------|------|
+| 重置模型零位 | 关节目标与仿真状态回到零位（仿真运行中不可用） |
+
+**固定基座**
+
+- 下拉选择作为世界固定根的 link（默认 `base_link`）。
+- **应用并重新加载**：注入 `world` 固定关节并重建 MuJoCo / Pinocchio 模型。
+
+**质量编辑**（折叠）
+
+- 按 link 编辑质量、质心、惯量张量。
+- 按关节编辑 `lower` / `upper` / `effort` / `velocity` 限位。
+- **应用更改** 后重新加载动力学模型。
+
+**关节预览**（折叠）
+
+- 仅运动学预览（不驱动物理仿真），仿真运行中锁定。
+
+### 左侧：仿真
+
+| 项 | 说明 |
+|----|------|
+| MuJoCo 状态 | 就绪 / 运行中 / 已暂停 / 错误 |
+| control_dt | 控制周期（秒），默认 0.002；越小轨迹越平滑，运行中不可改 |
+
+**控制模式**（在右侧「控制」面板切换，此处为说明）：
+
+- **实时模式**：开始仿真后持续跟踪控制面板目标；暂停挂起步进，停止重置姿态。
+- **插值模式**：开始仿真后保持当前姿态；在控制面板「添加目标」→「执行」做限速插值运动。
+
+### 左侧：仿真传输
+
+| 按钮 | 说明 |
+|------|------|
+| ▶ 开始仿真 | 就绪状态下启动；运行中变为停止 |
+| ⏹ 停止仿真 | 结束循环，MuJoCo 姿态复位；**曲线录制数据保留** |
+| ⏸ 暂停 / ▶ 继续 | 仅运行中可用，暂停物理步进 |
+
+### 中央：三维视口
+
+- 显示当前模型的 STL / 几何 mesh，随仿真关节角实时更新。
+- **末端模式** + 启用 IK：显示交互 Gizmo，拖拽后按控制模式插值或实时跟踪。
+- **参考姿态**：由「可视化」面板配置（TF 坐标系 / 绿色幽灵 / 关闭）。
+- 网格地面、轨道旋转、缩放平移（OrbitControls）。
+
+### 右侧：控制
+
+**控制层**
+
+| 层 | 内容 |
+|----|------|
+| 关节 | 各关节目标角滑条 + 数值输入 |
+| 末端 | 末端 link 选择、XYZ 目标、IK 状态、Gizmo 重置 |
+
+**控制模式**
+
+| 模式 | 行为 |
+|------|------|
+| 实时 | 仿真运行中改目标即跟踪；Gizmo 松开后插值到位 |
+| 插值 | 调整目标 → **添加目标** 入队 → **执行** 按队列限速运动 |
+
+插值模式附加项：
+
+- **关节限速**（rad/s）
+- **线性** / **三次样条** 插值曲线
+- **目标队列**：查看、删除、导入/导出 CSV
+
+**关节增益 PD**（折叠）
+
+- 逆动力学前馈 + 关节 PD；自动增益由 `diag(mj_fullM)` 估算。
+- 可调全局阻尼系数、逐关节 Kp/Kd，支持一键重置。
+
+**IK 求解器**（折叠，末端层常用）
+
+| 项 | 说明 |
+|----|------|
+| 启用 IK | 控制 Gizmo 与参考姿态求解 |
+| 目标模式 | 位置 / 位姿 / 姿态 |
+| 权重与迭代 | 平移/旋转权重、最大迭代、阻尼、步长、收敛容差 |
+| 重置参考姿态 | 将 IK 参考系对齐当前末端 FK |
+
+### 右侧：负载
+
+**球体负载**
+
+- 选择 parent link、质量、半径。
+- 模式：**子 link**（新增球体 link）或 **修改惯量**（合并到现有 link）。
+- 列表管理已添加负载，支持单项移除或全部清除。
+- 变更后自动重载 URDF；**仿真运行中不可编辑**。
+
+**6D 外力**
+
+- 对指定 link 施加 Fx/Fy/Fz、Tx/Ty/Tz（仿真坐标系）。
+- 运行中修改实时生效；可一键清除全部外力。
+- 视口中显示外力方向标记。
+
+**URDF 片段**
+
+- 将自定义 link XML 以 fixed 关节拼接到选定 link。
+- 可展开查看/编辑当前 URDF 文本，**下载带负载的 URDF**。
+
+### 右侧：可视化
+
+| 项 | 说明 |
+|----|------|
+| 参考位姿显示 | TF 坐标系（默认）/ 绿色幽灵模型 / 关闭 |
+| 参考 TF 尺寸 | TF 模式下的坐标轴长度 |
+| 运动学链连线 | 高亮当前末端链路的 TF 连线 |
+| 显示碰撞体 | URDF collision 几何 |
+| 显示惯量 | 惯量椭球可视化 |
+| 显示关节轴 | 关节旋转轴 |
+| 模型透明度 | 0.1–1.0 |
+
+参考姿态含义：关节模式对照目标角；末端模式对照 IK 解算结果。
+
+### 底部：曲线
+
+| 页签 | 内容 |
+|------|------|
+| 位置 | 各关节 q：指令（虚线）vs 实际（实线） |
+| 速度 | 关节速度 |
+| 力矩 | 关节力矩 |
+| 末端 | 末端位置/姿态相关量 |
+
+工具栏：
+
+- **暂停/继续录制**：运行中可暂停向曲线写入（仿真不停）。
+- **清空曲线数据**：重置 recorder。
+- **录制窗口**：环形缓冲保留最近 N 秒（默认随会话配置）。
+- **导出 CSV**：选择指标、关节、全量/最近窗口，格式与桌面版对齐。
+
+支持滚轮缩放、拖拽平移；停止仿真后历史曲线仍保留，直至手动清空或窗口过期。
+
+## 典型工作流
+
+### 关节点到点（插值模式）
+
+1. 右栏 **控制** → **关节** + **插值**。
+2. 拖动关节滑条到目标 → **添加目标**（可多次入队）。
+3. 左栏 **▶ 开始仿真** → 右栏 **执行**。
+4. 底部曲线查看跟踪效果 → **导出 CSV**。
+
+### 末端拖拽（实时模式）
+
+1. 右栏 **末端** + **实时**，启用 IK。
+2. 左栏 **▶ 开始仿真**。
+3. 视口拖动 Gizmo；松开后自动插值跟踪。
+4. 顶栏查看 IK 收敛状态与耗时。
+
+### 添加负载后重仿真
+
+1. 右栏 **负载** 添加球体或 URDF 片段。
+2. 等待模型重载完成（状态 **就绪**）。
+3. 重新 **开始仿真** 观察力矩变化。
+
+### 导入自有机器人
+
+1. 将 URDF 与 mesh 打成 ZIP（或选含模型的文件夹）。
+2. 多 URDF 时在下拉框选择主文件 → **加载所选 URDF**。
+3. **固定基座** 确认根 link → **应用并重新加载**。
+
+## 快捷键
+
+| 按键 | 作用 |
+|------|------|
+| `Space` | 运行中：停止仿真；就绪时：开始仿真（焦点不在输入框/按钮上时） |
 
 ## 技术栈
 
@@ -43,79 +271,53 @@
 
 - Node.js 18+（推荐 20+）
 - 支持 WebGL 的现代浏览器
-- 首次加载需下载 MuJoCo WASM（约 10 MB）
+- 首次加载需下载 MuJoCo / Pinocchio WASM（约 10 MB 级）
 
-## 快速开始
-
-```bash
-npm install
-npm run dev
-```
-
-浏览器访问终端提示的本地地址（默认 `http://localhost:5173`）。
-
-## 构建与测试
+## 开发与构建
 
 ```bash
-npm run build       # 输出 dist/，可部署至静态托管
-npm run preview     # 本地预览生产构建
-npm test            # Vitest 单元测试
-npm run test:watch  # 监听模式
+npm run dev          # 开发服务器
+npm run build        # 生产构建 → dist/
+npm run preview      # 预览构建产物
+npm test             # Vitest 单元测试
+npm run test:watch   # 监听模式
+npm run package:test-arm-zip   # 从 kuavo biped_s56 重新打包 test_arm
 ```
+
+开发环境默认加载 `biped_s70_upper_body`，STL 通过 Vite 插件映射本机 `/biped-assets`（见 `vite-biped-assets.ts`）。可用 URL 参数 `?noAutoLoad=1` 跳过自动加载。
 
 ## Cloudflare Workers 部署
 
-与 [robot_motion_editor](https://github.com/fandesfyf/robot_motion_editor) 相同：纯静态 SPA，通过 Workers **Static Assets** 托管（见根目录 `wrangler.jsonc`）。
-
-在 **Workers & Pages → 你的 Worker → Settings → Builds** 中配置：
+与 [robot_motion_editor](https://github.com/fandesfyf/robot_motion_editor) 相同：纯静态 SPA，通过 Workers **Static Assets** 托管（`wrangler.jsonc`）。
 
 | 项 | 值 |
 |----|-----|
-| 根目录 | `/`（仓库根即项目根，含 `package.json`） |
-| **Build command** | `npm run build` |
-| **Deploy command** | `npx wrangler deploy`（默认） |
-
-注意：**Dashboard 中的 Worker 名称**须与 `wrangler.jsonc` 里 `"name"` 一致（当前为 `arm-dynamics-studio`），否则部署会失败。SPA 路由由 `assets.not_found_handling` 处理，勿使用 `public/_redirects`（Workers 上会触发无限循环）。
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Worker 名称 | 与 `wrangler.jsonc` 中 `name` 一致（`arm-dynamics-studio`） |
 
 可选环境变量：`NODE_VERSION=20`、`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`。
 
-构建日志中 `fs` / `path` externalized 警告可忽略。`public/_headers` 已为 `.wasm` 设置 MIME 类型。
-
-本机手动发布：`npm run build` 后执行 `npx wrangler deploy`（首次需 `npx wrangler login`）。
-
-> 线上默认加载 `test_arm`（`public/robots/test_arm.zip`，源自 kuavo `biped_s56` 的 `biped_v3_arm.urdf` + STL mesh）；开发环境默认 `biped_s70_upper_body`（依赖本机 `/biped-assets`）。重新打包：`npm run package:test-arm-zip`（源路径见脚本 `BIPED_S56_ROOT`）。
+> **线上**默认加载 `test_arm.zip`（kuavo `biped_s56` / `biped_v3_arm.urdf`）。重新打包：`npm run package:test-arm-zip`（源目录环境变量 `BIPED_S56_ROOT`）。
 
 ## 项目结构
 
 ```
 .
-├── docs/                    # 设计与评审文档
-├── public/
-│   └── robots/              # 内置 URDF 模型
-├── scripts/                 # 构建辅助脚本
+├── public/robots/           # 内置 URDF、test_arm.zip
+├── scripts/                 # 打包与辅助脚本
 ├── src/
 │   ├── components/
-│   │   ├── Viewer/          # 三维视口、URDF 模型、运动目标标记
-│   │   ├── charts/          # uPlot 实时曲线与导出
-│   │   ├── layout/          # 菜单栏、侧边栏、可停靠面板
-│   │   ├── panels/          # 模型、仿真、控制、IK、轨迹等功能面板
-│   │   └── ui/              # 通用 UI 组件与浮动面板
-│   ├── contexts/            # React 上下文（如末端 IK）
-│   ├── core/                # 仿真核心：控制器、轨迹、规划、载荷编辑
-│   ├── export/              # CSV 时序数据导出
-│   ├── fixtures/            # 测试用 URDF 样例
-│   ├── hooks/               # useSimulation 等仿真生命周期钩子
-│   ├── ik/                  # closed-chain-ik 桥接与末端控制
-│   ├── mujoco/              # MuJoCo 加载、步进、外力
-│   ├── pinocchio/           # pinocchio-js 封装与 IK
-│   ├── stores/              # Zustand 会话 / UI / 可视化状态
-│   ├── types/               # 共享类型定义
-│   ├── utils/               # URDF 解析、资源加载、ZIP 解压
-│   └── viewer/              # 末端运动学、Gizmo 同步
-├── index.html
-├── package.json
-├── vite.config.ts
-└── vitest.config.ts
+│   │   ├── Viewer/          # 三维视口、URDF、标记
+│   │   ├── charts/          # 实时曲线与 CSV 导出
+│   │   ├── layout/          # 菜单栏、可停靠侧栏
+│   │   └── panels/          # 模型、仿真、控制、负载、可视化
+│   ├── core/                # 仿真、控制器、轨迹、负载编辑
+│   ├── hooks/               # useSimulation 生命周期
+│   ├── mujoco/ pinocchio/ ik/
+│   └── stores/              # 会话、UI、可视化状态
+├── wrangler.jsonc
+└── vite.config.ts
 ```
 
 ## 许可证

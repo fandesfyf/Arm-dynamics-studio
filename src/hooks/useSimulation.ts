@@ -379,6 +379,9 @@ export function useSimulation() {
 
   const flushChartLive = useCallback(
     (engine: SimulationEngine) => {
+      if (useSessionStore.getState().recorderPaused) {
+        return;
+      }
       const wallTime = performance.now() / 1000 - chartWallEpochSecRef.current;
       if (lastChartFlushTimeRef.current !== null && wallTime <= lastChartFlushTimeRef.current) {
         return;
@@ -429,7 +432,7 @@ export function useSimulation() {
     }
 
     const eng = engineRef.current;
-    if (eng) {
+    if (eng && !useSessionStore.getState().recorderPaused) {
       applyRecorderWindow(eng);
       flushChartLive(eng);
     }
@@ -440,7 +443,7 @@ export function useSimulation() {
         return;
       }
       const state = useSessionStore.getState();
-      if (state.simStatus === 'running' && !pauseRef.current) {
+      if (state.simStatus === 'running' && !pauseRef.current && !state.recorderPaused) {
         const now = performance.now();
         if (now - lastChartFlushMsRef.current >= CHART_FLUSH_INTERVAL_MS) {
           lastChartFlushMsRef.current = now;
@@ -1168,7 +1171,7 @@ export function useSimulation() {
     setPaused(next);
     if (next) {
       const engine = engineRef.current;
-      if (engine) {
+      if (engine && !useSessionStore.getState().recorderPaused) {
         flushChartLive(engine);
       }
     }
