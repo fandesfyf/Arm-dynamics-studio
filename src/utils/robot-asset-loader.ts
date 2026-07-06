@@ -26,61 +26,99 @@ function basename(path: string): string {
   return idx >= 0 ? normalized.slice(idx + 1) : normalized;
 }
 
-/** 去掉 zip/文件夹共用的顶层包名（如 biped_s70/） */
+/** 去掉 zip/文件夹共用的顶层包名（如 biped_s70/），仅剥离一层目录 */
 export function stripPackageRoot(paths: string[]): { paths: string[]; prefix: string } {
   if (paths.length === 0) return { paths, prefix: '' };
 
   const split = paths.map((p) => normalizePath(p).split('/').filter(Boolean));
-  const minDepth = Math.min(...split.map((p) => p.length));
-
-  let common = 0;
-  for (let i = 0; i < minDepth - 1; i++) {
-    const seg = split[0]![i];
-    if (split.every((p) => p[i] === seg)) common++;
-    else break;
+  const first = split[0]?.[0];
+  if (
+    first &&
+    split.every((p) => p.length > 1 && p[0] === first) &&
+    split.some((p) => p.length > 2)
+  ) {
+    return {
+      prefix: first,
+      paths: split.map((parts) => parts.slice(1).join('/')),
+    };
   }
 
-  if (common === 0 && split.every((p) => p.length > 1 && p[0] === split[0]![0])) {
-    common = 1;
-  }
+  return { paths: paths.map(normalizePath), prefix: '' };
+}
 
-  if (common === 0) {
-    return { paths: paths.map(normalizePath), prefix: '' };
+function stripPathWithPrefix(path: string, prefix: string): string {
+  const normalized = normalizePath(path);
+  if (!prefix) return normalized;
+  if (normalized === prefix) return '';
+  const withSlash = `${prefix}/`;
+  if (normalized.startsWith(withSlash)) {
+    return normalized.slice(withSlash.length);
   }
+  return normalized;
+}
 
-  const prefix = split[0]!.slice(0, common).join('/');
+export interface PreparedFolderFiles {
+  prefix: string;
+  strippedPaths: string[];
+  strippedToFile: Map<string, File>;
+}
+
+/** 将文件夹上传的文件列表规范为 strip 后的相对路径，并建立路径→File 映射 */
+export function prepareFolderFiles(files: File[]): PreparedFolderFiles {
+  const fileMap = new Map<string, File>();
+  for (const file of files) {
+    const path = normalizePath(file.webkitRelativePath || file.name);
+    if (path) fileMap.set(path, file);
+  }
+  const rawPaths = [...fileMap.keys()];
+  const { prefix, paths } = stripPackageRoot(rawPaths);
+  const strippedToFile = new Map<string, File>();
+  for (const [fullPath, file] of fileMap) {
+    const stripped = stripPathWithPrefix(fullPath, prefix);
+    if (stripped) strippedToFile.set(stripped, file);
+  }
   return {
     prefix,
-    paths: split.map((parts) => parts.slice(common).join('/')),
+    strippedPaths: [...new Set(paths.filter(Boolean))],
+    strippedToFile,
   };
 }
 
-export function pickUrdfPath(paths: string[]): string {
+function scoreUrdfPath(p: string): number {
+  const fileName = basename(p).replace(/\.urdf$/i, '');
+  const topFolder = p.split('/')[0] ?? '';
+  let score = 0;
+  if (fileName === topFolder) score += 100;
+  else if (topFolder && fileName.includes(topFolder)) score += 60;
+  else if (fileName === 'robot') score += 20;
+  if (/upper_body|upperbody|_arm\b/i.test(fileName)) score += 80;
+  if (/\/urdf\//i.test(p)) score += 30;
+  score -= p.split('/').length;
+  return score;
+}
+
+/** 列出 ZIP/文件夹内可选 URDF（递归子目录，按推荐度排序） */
+export function listUrdfCandidates(
+  paths: string[],
+  options?: { includeSkippedDirs?: boolean },
+): string[] {
   let candidates = paths.filter((p) => URDF_EXT.test(p));
   if (candidates.length === 0) {
     throw new Error('未找到 .urdf 文件');
   }
 
-  candidates = candidates.filter((p) => !URDF_SKIP_DIRS.test(`/${p}/`));
+  if (!options?.includeSkippedDirs) {
+    candidates = candidates.filter((p) => !URDF_SKIP_DIRS.test(`/${p}/`));
+  }
 
-  const inUrdfFolder = candidates.filter((p) => /(^|\/)urdf\/[^/]+\.urdf$/i.test(p));
-  const pool = inUrdfFolder.length > 0 ? inUrdfFolder : candidates;
+  return candidates
+    .map((p) => ({ p, score: scoreUrdfPath(p) }))
+    .sort((a, b) => b.score - a.score || a.p.localeCompare(b.p))
+    .map((item) => item.p);
+}
 
-  const scored = pool.map((p) => {
-    const fileName = basename(p).replace(/\.urdf$/i, '');
-    const topFolder = p.split('/')[0] ?? '';
-    let score = 0;
-    if (fileName === topFolder) score += 100;
-    else if (topFolder && fileName.includes(topFolder)) score += 60;
-    else if (fileName === 'robot') score += 20;
-    if (/upper_body|upperbody|_arm\b/i.test(fileName)) score += 80;
-    if (/\/urdf\//i.test(p)) score += 30;
-    score -= p.split('/').length;
-    return { p, score };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0]!.p;
+export function pickUrdfPath(paths: string[]): string {
+  return listUrdfCandidates(paths)[0]!;
 }
 
 /** 将 URDF mesh 引用解析为 bundle 内相对路径（与 VFS /robot/ 根一致） */
@@ -127,12 +165,16 @@ export function findMeshBytes(
 async function buildBundleFromPaths(
   rawPaths: string[],
   readFile: (path: string) => Promise<{ text?: string; bytes?: Uint8Array }>,
+  urdfRelPathOverride?: string,
 ): Promise<RobotAssetExtract> {
   const normalized = rawPaths.map(normalizePath).filter(Boolean);
   const { paths } = stripPackageRoot(normalized);
   const pathSet = new Set(paths);
 
-  const urdfRelPath = pickUrdfPath(paths);
+  const urdfRelPath = urdfRelPathOverride ?? pickUrdfPath(paths);
+  if (!pathSet.has(urdfRelPath)) {
+    throw new Error(`URDF 不存在: ${urdfRelPath}`);
+  }
   const urdfData = await readFile(urdfRelPath);
   if (!urdfData.text) {
     throw new Error(`无法读取 URDF: ${urdfRelPath}`);
@@ -178,8 +220,28 @@ async function toArrayBuffer(
   return input.arrayBuffer();
 }
 
+export async function listUrdfPathsFromZip(
+  input: ArrayBuffer | Blob | File | Uint8Array,
+  options?: { includeSkippedDirs?: boolean },
+): Promise<string[]> {
+  const buffer = await toArrayBuffer(input);
+  const zip = await JSZip.loadAsync(buffer);
+  const rawPaths = Object.keys(zip.files).filter((p) => !zip.files[p]!.dir);
+  const { paths } = stripPackageRoot(rawPaths.map(normalizePath));
+  return listUrdfCandidates(paths, options);
+}
+
+export function listUrdfPathsFromFiles(
+  files: File[],
+  options?: { includeSkippedDirs?: boolean },
+): string[] {
+  const { strippedPaths } = prepareFolderFiles(files);
+  return listUrdfCandidates(strippedPaths, options);
+}
+
 export async function extractRobotFromZip(
   input: ArrayBuffer | Blob | File | Uint8Array,
+  urdfRelPath?: string,
 ): Promise<RobotAssetExtract> {
   const buffer = await toArrayBuffer(input);
   const zip = await JSZip.loadAsync(buffer);
@@ -187,51 +249,51 @@ export async function extractRobotFromZip(
   const rawPaths = Object.keys(zip.files).filter((p) => !zip.files[p]!.dir);
   const zipMap = new Map(rawPaths.map((p) => [normalizePath(p), zip.files[p]!]));
 
-  return buildBundleFromPaths(rawPaths.map(normalizePath), async (relPath) => {
-    const entry =
-      zipMap.get(relPath) ??
-      [...zipMap.entries()].find(([p]) => p.endsWith(`/${relPath}`))?.[1];
-    if (!entry) {
-      throw new Error(`ZIP 内缺少文件: ${relPath}`);
-    }
-    if (URDF_EXT.test(relPath)) {
-      return { text: await entry.async('string') };
-    }
-    return { bytes: await entry.async('uint8array') };
-  });
+  return buildBundleFromPaths(
+    rawPaths.map(normalizePath),
+    async (relPath) => {
+      const entry =
+        zipMap.get(relPath) ??
+        [...zipMap.entries()].find(([p]) => p.endsWith(`/${relPath}`))?.[1];
+      if (!entry) {
+        throw new Error(`ZIP 内缺少文件: ${relPath}`);
+      }
+      if (URDF_EXT.test(relPath)) {
+        return { text: await entry.async('string') };
+      }
+      return { bytes: await entry.async('uint8array') };
+    },
+    urdfRelPath,
+  );
 }
 
 export async function extractRobotFromFiles(
   files: File[],
+  urdfRelPath?: string,
 ): Promise<RobotAssetExtract> {
   if (files.length === 0) {
     throw new Error('未收到任何文件');
   }
 
-  const fileMap = new Map<string, File>();
-  for (const file of files) {
-    const path = normalizePath(file.webkitRelativePath || file.name);
-    fileMap.set(path, file);
-    if (!fileMap.has(file.name)) {
-      fileMap.set(file.name, file);
-    }
-  }
+  const { strippedPaths, strippedToFile } = prepareFolderFiles(files);
 
-  const paths = [...new Set(fileMap.keys())];
-
-  return buildBundleFromPaths(paths, async (relPath) => {
-    const file =
-      fileMap.get(relPath) ??
-      [...fileMap.entries()].find(([p]) => p.endsWith(`/${relPath}`))?.[1];
-    if (!file) {
-      throw new Error(`文件夹内缺少文件: ${relPath}`);
-    }
-    if (URDF_EXT.test(relPath)) {
-      return { text: await file.text() };
-    }
-    const buf = await file.arrayBuffer();
-    return { bytes: new Uint8Array(buf) };
-  });
+  return buildBundleFromPaths(
+    strippedPaths,
+    async (relPath) => {
+      const file =
+        strippedToFile.get(relPath) ??
+        [...strippedToFile.entries()].find(([p]) => p.endsWith(`/${relPath}`))?.[1];
+      if (!file) {
+        throw new Error(`文件夹内缺少文件: ${relPath}`);
+      }
+      if (URDF_EXT.test(relPath)) {
+        return { text: await file.text() };
+      }
+      const buf = await file.arrayBuffer();
+      return { bytes: new Uint8Array(buf) };
+    },
+    urdfRelPath,
+  );
 }
 
 export async function extractRobotFromFileList(

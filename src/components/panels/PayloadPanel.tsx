@@ -3,22 +3,27 @@ import { parseLinkNames } from '../../utils/urdf-base-fixture';
 import {
   appendSpherePayloadWithRecord,
   attachUrdfSnippet,
+  listSpherePayloadDisplayItems,
   listSpherePayloadLinks,
   parseWrenchValues,
   removeLastSpherePayloadOnLink,
   removeSpherePayloads,
   revertModifyInertialPayload,
   solidSphereInertia,
-  type SpherePayloadMode,
+  SPHERE_PAYLOAD_LINK_PATTERN,
   type PayloadRecord,
 } from '../../core/payload-editor';
-import { finalizeUrdfForMujoco } from '../../utils/urdf-sanitize';
 import { useSessionStore } from '../../stores/session-store';
 
 export interface PayloadPanelProps {
   urdfText: string;
   onUrdfChanged: (xml: string) => void | Promise<void>;
-  disabled?: boolean;
+  /** 禁用添加/移除负载（仿真运行中、加载中） */
+  payloadDisabled?: boolean;
+  /** 禁用表单输入（仅加载中） */
+  payloadFormDisabled?: boolean;
+  /** 禁用外力编辑（仅加载中） */
+  wrenchDisabled?: boolean;
   onExternalWrenchChange?: () => void;
 }
 
@@ -36,12 +41,16 @@ const WRENCH_LABELS: { key: (typeof WRENCH_FIELDS)[number]; label: string }[] = 
 export function PayloadPanel({
   urdfText,
   onUrdfChanged,
-  disabled,
+  payloadDisabled = false,
+  payloadFormDisabled = false,
+  wrenchDisabled = false,
   onExternalWrenchChange,
 }: PayloadPanelProps) {
   const externalWrenches = useSessionStore((s) => s.externalWrenches);
   const payloadRecords = useSessionStore((s) => s.payloadRecords);
   const simStatus = useSessionStore((s) => s.simStatus);
+  const payloadFormDraft = useSessionStore((s) => s.payloadFormDraft);
+  const setPayloadFormDraft = useSessionStore((s) => s.setPayloadFormDraft);
   const setExternalWrench = useSessionStore((s) => s.setExternalWrench);
   const clearExternalWrenches = useSessionStore((s) => s.clearExternalWrenches);
   const addPayloadRecord = useSessionStore((s) => s.addPayloadRecord);
@@ -49,24 +58,29 @@ export function PayloadPanel({
   const clearPayloadRecords = useSessionStore((s) => s.clearPayloadRecords);
 
   const linkOptions = useMemo(
-    () => parseLinkNames(urdfText).filter((name) => name !== 'world'),
+    () =>
+      parseLinkNames(urdfText).filter(
+        (name) => name !== 'world' && !SPHERE_PAYLOAD_LINK_PATTERN.test(name),
+      ),
     [urdfText],
   );
 
-  const spherePayloadCount = useMemo(() => listSpherePayloadLinks(urdfText).length, [urdfText]);
+  const spherePayloadItems = useMemo(
+    () => listSpherePayloadDisplayItems(urdfText, payloadRecords),
+    [payloadRecords, urdfText],
+  );
 
-  const [selectedLink, setSelectedLink] = useState(linkOptions[0] ?? '');
-  const [sphereMass, setSphereMass] = useState(0.2);
-  const [sphereRadius, setSphereRadius] = useState(0.03);
-  const [sphereMode, setSphereMode] = useState<SpherePayloadMode>('child_link');
-  const [wrenchDraft, setWrenchDraft] = useState<Record<string, number>>({
-    fx: 0,
-    fy: 0,
-    fz: 0,
-    tx: 0,
-    ty: 0,
-    tz: 0,
-  });
+  const spherePayloadCount = spherePayloadItems.length;
+
+  const {
+    payloadLink,
+    wrenchLink,
+    sphereMass,
+    sphereRadius,
+    sphereMode,
+    wrenchDraft,
+  } = payloadFormDraft;
+
   const [snippetText, setSnippetText] = useState(
     `<link name="payload_tool">\n  <inertial>\n    <mass value="0.1"/>\n    <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>\n  </inertial>\n</link>`,
   );
@@ -86,7 +100,17 @@ export function PayloadPanel({
     return `${name}_with_payload.urdf`;
   }, [robotInfo, urdfFileName, urdfText]);
 
-  const activeLink = selectedLink || linkOptions[0] || '';
+  const activePayloadLink =
+    payloadLink && linkOptions.includes(payloadLink)
+      ? payloadLink
+      : linkOptions[0] ?? '';
+  const activeWrenchLink =
+    wrenchLink && linkOptions.includes(wrenchLink) ? wrenchLink : linkOptions[0] ?? '';
+
+  const payloadSelectValue =
+    payloadLink && linkOptions.includes(payloadLink) ? payloadLink : activePayloadLink;
+  const wrenchSelectValue =
+    wrenchLink && linkOptions.includes(wrenchLink) ? wrenchLink : activeWrenchLink;
 
   const previewInertia = useMemo(() => {
     try {
@@ -100,9 +124,8 @@ export function PayloadPanel({
   const applyUrdfChange = useCallback(
     async (xml: string, message: string, record?: PayloadRecord) => {
       try {
-        const finalized = finalizeUrdfForMujoco(xml);
         setError(null);
-        await onUrdfChanged(finalized);
+        await onUrdfChanged(xml);
         if (record) addPayloadRecord(record);
         setNotice(message);
       } catch (err) {
@@ -116,9 +139,12 @@ export function PayloadPanel({
   const handleAddSphere = useCallback(() => {
     void (async () => {
       try {
-        if (!activeLink) throw new Error('请选择目标 link');
+        if (!activePayloadLink) throw new Error('请选择目标 link');
+        if (import.meta.env.DEV) {
+          console.log('[payload] 添加球体负载', { link: activePayloadLink, mass: sphereMass, radius: sphereRadius, mode: sphereMode });
+        }
         const { urdfText: xml, record } = appendSpherePayloadWithRecord(urdfText, {
-          parentLink: activeLink,
+          parentLink: activePayloadLink,
           mass: sphereMass,
           radius: sphereRadius,
           mode: sphereMode,
@@ -126,8 +152,8 @@ export function PayloadPanel({
         await applyUrdfChange(
           xml,
           sphereMode === 'child_link'
-            ? `已在 ${activeLink} 添加球体负载，请重新运行仿真`
-            : `已更新 ${activeLink} 惯量，请重新运行仿真`,
+            ? `已在 ${activePayloadLink} 添加球体负载，请重新运行仿真`
+            : `已更新 ${activePayloadLink} 惯量，请重新运行仿真`,
           record,
         );
       } catch (err) {
@@ -136,7 +162,7 @@ export function PayloadPanel({
       }
     })();
   }, [
-    activeLink,
+    activePayloadLink,
     applyUrdfChange,
     sphereMass,
     sphereMode,
@@ -147,26 +173,26 @@ export function PayloadPanel({
   const handleRemoveSphereOnLink = useCallback(() => {
     void (async () => {
       try {
-        if (!activeLink) throw new Error('请选择目标 link');
+        if (!activePayloadLink) throw new Error('请选择目标 link');
 
         const modifyRecords = [...payloadRecords]
           .reverse()
-          .filter((r) => r.parentLink === activeLink && r.kind === 'modify_inertial');
+          .filter((r) => r.parentLink === activePayloadLink && r.kind === 'modify_inertial');
 
         if (modifyRecords.length > 0) {
           const record = modifyRecords[0]!;
           const xml = revertModifyInertialPayload(urdfText, record);
-          await applyUrdfChange(xml, `已还原 ${activeLink} 的惯量修改`);
+          await applyUrdfChange(xml, `已还原 ${activePayloadLink} 的惯量修改`);
           removePayloadRecord(record.id);
           return;
         }
 
         const childRecords = payloadRecords.filter(
-          (r) => r.parentLink === activeLink && r.kind === 'child_link',
+          (r) => r.parentLink === activePayloadLink && r.kind === 'child_link',
         );
-        const xml = removeLastSpherePayloadOnLink(urdfText, activeLink);
+        const xml = removeLastSpherePayloadOnLink(urdfText, activePayloadLink);
         const removed = childRecords[childRecords.length - 1];
-        await applyUrdfChange(xml, `已移除 ${activeLink} 上的球体负载`);
+        await applyUrdfChange(xml, `已移除 ${activePayloadLink} 上的球体负载`);
         if (removed) removePayloadRecord(removed.id);
       } catch (err) {
         setNotice(null);
@@ -174,54 +200,96 @@ export function PayloadPanel({
       }
     })();
   }, [
-    activeLink,
+    activePayloadLink,
     applyUrdfChange,
     payloadRecords,
     removePayloadRecord,
     urdfText,
   ]);
 
+  const handleRemovePayloadItem = useCallback(
+    (itemId: string) => {
+      void (async () => {
+        try {
+          const record = payloadRecords.find((r) => r.id === itemId);
+          const item = spherePayloadItems.find((entry) => entry.id === itemId);
+          if (!item) return;
+
+          if (record?.kind === 'modify_inertial') {
+            const xml = revertModifyInertialPayload(urdfText, record);
+            await applyUrdfChange(xml, `已还原 ${record.parentLink} 的惯量修改`);
+            removePayloadRecord(record.id);
+            return;
+          }
+
+          const payloadLinkName = record?.payloadLink ?? item.payloadLink;
+          if (!payloadLinkName) {
+            throw new Error('未找到可移除的球体负载 link');
+          }
+
+          const xml = removeSpherePayloads(urdfText, [payloadLinkName]);
+          await applyUrdfChange(xml, `已移除 ${item.parentLink} 上的球体负载`);
+          if (record) {
+            removePayloadRecord(record.id);
+          }
+        } catch (err) {
+          setNotice(null);
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })();
+    },
+    [
+      applyUrdfChange,
+      payloadRecords,
+      removePayloadRecord,
+      spherePayloadItems,
+      urdfText,
+    ],
+  );
+
   const handleApplyWrench = useCallback(() => {
     try {
-      if (!activeLink) throw new Error('请选择目标 link');
+      if (!activeWrenchLink) throw new Error('请选择外力目标 link');
       const wrench = parseWrenchValues(wrenchDraft);
-      setExternalWrench(activeLink, wrench);
+      setExternalWrench(activeWrenchLink, wrench);
       onExternalWrenchChange?.();
       setError(null);
       setNotice(
         simStatus === 'running'
-          ? `已对 ${activeLink} 施加 6D 外力，外力已生效`
-          : `已对 ${activeLink} 设置 6D 外力，开始仿真后生效`,
+          ? `已对 ${activeWrenchLink} 施加 6D 外力（仿真中实时生效）`
+          : `已对 ${activeWrenchLink} 设置 6D 外力，开始仿真后生效`,
       );
     } catch (err) {
       setNotice(null);
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [activeLink, onExternalWrenchChange, setExternalWrench, simStatus, wrenchDraft]);
+  }, [activeWrenchLink, onExternalWrenchChange, setExternalWrench, simStatus, wrenchDraft]);
 
   const handleClearWrenches = useCallback(() => {
     clearExternalWrenches();
     onExternalWrenchChange?.();
-    setWrenchDraft({ fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 });
+    setPayloadFormDraft({
+      wrenchDraft: { fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 },
+    });
     setNotice(simStatus === 'running' ? '已清除全部 6D 外力，变更已生效' : '已清除全部 6D 外力');
     setError(null);
-  }, [clearExternalWrenches, onExternalWrenchChange, simStatus]);
+  }, [clearExternalWrenches, onExternalWrenchChange, setPayloadFormDraft, simStatus]);
 
   const handleAttachSnippet = useCallback(() => {
     void (async () => {
       try {
-        if (!activeLink) throw new Error('请选择目标 link');
+        if (!activePayloadLink) throw new Error('请选择目标 link');
         const xml = attachUrdfSnippet(urdfText, {
-          parentLink: activeLink,
+          parentLink: activePayloadLink,
           snippetXml: snippetText,
         });
-        await applyUrdfChange(xml, `已将 URDF 片段 fixed 拼接到 ${activeLink}，请重新运行仿真`);
+        await applyUrdfChange(xml, `已将 URDF 片段 fixed 拼接到 ${activePayloadLink}，请重新运行仿真`);
       } catch (err) {
         setNotice(null);
         setError(err instanceof Error ? err.message : String(err));
       }
     })();
-  }, [activeLink, applyUrdfChange, snippetText, urdfText]);
+  }, [activePayloadLink, applyUrdfChange, snippetText, urdfText]);
 
   const handleClearAllPayloadsAndWrenches = useCallback(() => {
     void (async () => {
@@ -237,7 +305,9 @@ export function PayloadPanel({
         clearPayloadRecords();
         clearExternalWrenches();
         onExternalWrenchChange?.();
-        setWrenchDraft({ fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 });
+        setPayloadFormDraft({
+          wrenchDraft: { fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 },
+        });
         await applyUrdfChange(xml, '已清除全部负载与外力，请重新运行仿真');
       } catch (err) {
         setNotice(null);
@@ -250,6 +320,7 @@ export function PayloadPanel({
     clearPayloadRecords,
     onExternalWrenchChange,
     payloadRecords,
+    setPayloadFormDraft,
     urdfText,
   ]);
 
@@ -293,10 +364,10 @@ export function PayloadPanel({
     }
   }, [urdfText]);
 
-  const activeWrench = activeLink ? externalWrenches.get(activeLink) : undefined;
+  const activeWrench = activeWrenchLink ? externalWrenches.get(activeWrenchLink) : undefined;
   const hasPayloadOnLink =
-    payloadRecords.some((r) => r.parentLink === activeLink) ||
-    listSpherePayloadLinks(urdfText).some((name) => name.startsWith(`${activeLink}_payload`));
+    payloadRecords.some((r) => r.parentLink === activePayloadLink) ||
+    listSpherePayloadLinks(urdfText).some((name) => name.startsWith(`${activePayloadLink}_payload`));
 
   return (
     <section className="mass-editor-panel payload-panel">
@@ -304,12 +375,13 @@ export function PayloadPanel({
       {error && <p className="mass-editor-error">{error}</p>}
       {notice && <p className="hint">{notice}</p>}
 
+      <h4>球体负载</h4>
       <label className="field-label">
-        目标 Link
+        负载目标 Link
         <select
-          value={activeLink}
-          disabled={disabled}
-          onChange={(e) => setSelectedLink(e.target.value)}
+          value={payloadSelectValue}
+          disabled={payloadFormDisabled}
+          onChange={(e) => setPayloadFormDraft({ payloadLink: e.target.value })}
         >
           {linkOptions.map((name) => (
             <option key={name} value={name}>
@@ -318,8 +390,6 @@ export function PayloadPanel({
           ))}
         </select>
       </label>
-
-      <h4>球体负载</h4>
       <div className="payload-grid">
         <label className="field-label">
           质量 (kg)
@@ -327,9 +397,9 @@ export function PayloadPanel({
             type="number"
             min={0}
             step="any"
-            disabled={disabled}
+            disabled={payloadFormDisabled}
             value={sphereMass}
-            onChange={(e) => setSphereMass(Number(e.target.value))}
+            onChange={(e) => setPayloadFormDraft({ sphereMass: Number(e.target.value) })}
           />
         </label>
         <label className="field-label">
@@ -338,9 +408,9 @@ export function PayloadPanel({
             type="number"
             min={0}
             step="any"
-            disabled={disabled}
+            disabled={payloadFormDisabled}
             value={sphereRadius}
-            onChange={(e) => setSphereRadius(Number(e.target.value))}
+            onChange={(e) => setPayloadFormDraft({ sphereRadius: Number(e.target.value) })}
           />
         </label>
       </div>
@@ -351,8 +421,8 @@ export function PayloadPanel({
             type="radio"
             name="sphereMode"
             checked={sphereMode === 'child_link'}
-            disabled={disabled}
-            onChange={() => setSphereMode('child_link')}
+            disabled={payloadFormDisabled}
+            onChange={() => setPayloadFormDraft({ sphereMode: 'child_link' })}
           />
           追加子 link + 球体
         </label>
@@ -361,8 +431,8 @@ export function PayloadPanel({
             type="radio"
             name="sphereMode"
             checked={sphereMode === 'modify_inertial'}
-            disabled={disabled}
-            onChange={() => setSphereMode('modify_inertial')}
+            disabled={payloadFormDisabled}
+            onChange={() => setPayloadFormDraft({ sphereMode: 'modify_inertial' })}
           />
           叠加到 link 惯量
         </label>
@@ -374,25 +444,78 @@ export function PayloadPanel({
       </p>
 
       <div className="payload-actions">
-        <button type="button" className="primary" disabled={disabled} onClick={handleAddSphere}>
+        <button type="button" className="primary" disabled={payloadDisabled} onClick={handleAddSphere}>
           添加球体负载
         </button>
         <button
           type="button"
           className="btn btn-secondary"
-          disabled={disabled || !hasPayloadOnLink}
+          disabled={payloadDisabled || !hasPayloadOnLink}
           onClick={handleRemoveSphereOnLink}
         >
           移除球体负载
         </button>
       </div>
-      {spherePayloadCount > 0 && (
-        <p className="hint">当前 URDF 中共有 {spherePayloadCount} 个球体负载 link</p>
+      {spherePayloadItems.length > 0 && (
+        <div className="payload-list-wrap">
+          <p className="payload-list-title">已添加负载 ({spherePayloadItems.length})</p>
+          <ul className="payload-list">
+            {spherePayloadItems.map((item) => {
+              const isActive = item.parentLink === activePayloadLink;
+              const kindLabel = item.kind === 'modify_inertial' ? '惯量叠加' : '子 link 球体';
+              return (
+                <li
+                  key={item.id}
+                  className={`payload-list-item${isActive ? ' payload-list-item--active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="payload-list-main"
+                    disabled={payloadFormDisabled}
+                    onClick={() => setPayloadFormDraft({ payloadLink: item.parentLink })}
+                  >
+                    <span className="payload-list-dot" aria-hidden />
+                    <span className="payload-list-text">
+                      <strong>{item.parentLink}</strong>
+                      <span className="payload-list-meta">
+                        {kindLabel} · {item.mass.toFixed(3)} kg · r={item.radius.toFixed(3)} m
+                        {item.payloadLink ? ` · ${item.payloadLink}` : ''}
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary payload-list-remove"
+                    disabled={payloadDisabled}
+                    title="移除此负载"
+                    onClick={() => handleRemovePayloadItem(item.id)}
+                  >
+                    移除
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
 
       <hr className="payload-divider" />
 
       <h4>6D 外力（link 坐标系）</h4>
+      <label className="field-label">
+        外力目标 Link
+        <select
+          value={wrenchSelectValue}
+          disabled={wrenchDisabled}
+          onChange={(e) => setPayloadFormDraft({ wrenchLink: e.target.value })}
+        >
+          {linkOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
       <div className="payload-grid payload-grid--wrench">
         {WRENCH_LABELS.map(({ key, label }) => (
           <label key={key} className="field-label">
@@ -400,10 +523,12 @@ export function PayloadPanel({
             <input
               type="number"
               step="any"
-              disabled={disabled}
+              disabled={wrenchDisabled}
               value={wrenchDraft[key] ?? 0}
               onChange={(e) =>
-                setWrenchDraft((prev) => ({ ...prev, [key]: Number(e.target.value) }))
+                setPayloadFormDraft({
+                  wrenchDraft: { ...wrenchDraft, [key]: Number(e.target.value) },
+                })
               }
             />
           </label>
@@ -411,24 +536,25 @@ export function PayloadPanel({
       </div>
       {activeWrench && (
         <p className="hint">
-          当前 {activeLink}: [{activeWrench.map((v) => v.toFixed(3)).join(', ')}]
+          当前 {activeWrenchLink}: [{activeWrench.map((v) => v.toFixed(3)).join(', ')}]
         </p>
       )}
       <div className="payload-actions">
-        <button type="button" className="primary" disabled={disabled} onClick={handleApplyWrench}>
+        <button type="button" className="primary" disabled={wrenchDisabled} onClick={handleApplyWrench}>
           应用外力
         </button>
         <button
           type="button"
           className="btn btn-secondary"
-          disabled={disabled || externalWrenches.size === 0}
+          disabled={wrenchDisabled || externalWrenches.size === 0}
           onClick={handleClearWrenches}
         >
           清除全部外力
         </button>
       </div>
       <p className="hint">
-        仿真运行中施加外力会立即写入 MuJoCo xfrc_applied；body 未找到时回退为 qfrc 常值偏置。
+        力/力矩在目标 link 坐标系下定义；fixed 子 link（如 end_effector）会变换到父 body 施加。
+        仿真运行中可实时修改外力；负载编辑需停止仿真。
       </p>
 
       <hr className="payload-divider" />
@@ -437,15 +563,15 @@ export function PayloadPanel({
       <textarea
         className="payload-snippet"
         rows={6}
-        disabled={disabled}
+        disabled={payloadFormDisabled}
         value={snippetText}
         onChange={(e) => setSnippetText(e.target.value)}
       />
       <label className="field-label payload-file">
         导入 .urdf / .xml 片段
-        <input type="file" accept=".urdf,.xml,text/xml" disabled={disabled} onChange={handleSnippetFile} />
+        <input type="file" accept=".urdf,.xml,text/xml" disabled={payloadDisabled} onChange={handleSnippetFile} />
       </label>
-      <button type="button" className="primary" disabled={disabled} onClick={handleAttachSnippet}>
+      <button type="button" className="primary" disabled={payloadDisabled} onClick={handleAttachSnippet}>
         拼接到所选 link
       </button>
 
@@ -474,11 +600,17 @@ export function PayloadPanel({
         </>
       )}
 
+      <p className="hint payload-sim-hint">
+        {payloadDisabled && simStatus === 'running'
+          ? '仿真运行中不可添加/移除负载（表单可继续编辑）；外力可实时调整。'
+          : null}
+      </p>
+
       <button
         type="button"
         className="btn btn-danger btn-block"
         disabled={
-          disabled ||
+          payloadDisabled ||
           (spherePayloadCount === 0 &&
             payloadRecords.length === 0 &&
             externalWrenches.size === 0)

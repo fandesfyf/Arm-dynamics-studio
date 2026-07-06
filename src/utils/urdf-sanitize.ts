@@ -5,13 +5,8 @@ const INERTIA_ATTRS = ['ixx', 'ixy', 'ixz', 'iyy', 'iyz', 'izz'] as const;
 /** Match <inertia .../> or <inertia>...</inertia> including multi-line tags. */
 const INERTIA_TAG_RE = /<inertia\b[\s\S]*?(?:\/>|>\s*<\/inertia>)/gi;
 
-function normalizeUrdfLineEndings(urdfText: string): string {
-  return urdfText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-function stripXmlDeclaration(urdfText: string): string {
-  return urdfText.replace(/^\uFEFF?<\?xml\b[^?]*\?>\s*/i, '');
-}
+const TORSO_ZERO_INERTIA_RE =
+  /(<link name="torso">[\s\S]*?<inertia\b)(\s+ixx="0"\s+ixy="0"\s+ixz="0"\s+iyy="0"\s+iyz="0"\s+izz="0"\s*)\/>/i;
 
 function parseInertiaValue(raw: string | null | undefined): number {
   if (raw == null || raw.trim() === '') return 0;
@@ -33,6 +28,7 @@ function parseAttrsFromTag(tag: string): Record<string, string> {
   return attrs;
 }
 
+/** 新建/修复用：紧凑自闭合 `<inertia .../>`（`/` 前不能有空格） */
 export function formatInertiaTag(attrs: Record<string, string>): string {
   const values: Record<string, string> = {};
   for (const name of INERTIA_ATTRS) {
@@ -48,25 +44,74 @@ export function formatInertiaTag(attrs: Record<string, string>): string {
     values.izz = String(MIN_INERTIA);
   }
   const body = INERTIA_ATTRS.map((a) => `${a}="${values[a]}"`).join(' ');
-  // MuJoCo URDF 解析器对自闭合 <inertia .../> 在部分 WASM 环境下会误报空属性名，使用显式闭合标签。
-  return `<inertia ${body}></inertia>`;
+  return `<inertia ${body}/>`;
 }
 
-function fixInertiaTagMatch(tag: string): string {
-  return formatInertiaTag(parseAttrsFromTag(tag));
+function isValidInertiaTag(tag: string): boolean {
+  if (/\s+="/.test(tag)) return false;
+  if (/"\s+[>\/]/.test(tag)) return false;
+  if (/<inertia\b[^>]*?\s+\/>/.test(tag)) return false;
+  const attrs = parseAttrsFromTag(tag);
+  for (const name of INERTIA_ATTRS) {
+    const raw = attrs[name];
+    if (raw == null || raw.trim() === '') return false;
+  }
+  const ixx = parseInertiaValue(attrs.ixx);
+  const iyy = parseInertiaValue(attrs.iyy);
+  const izz = parseInertiaValue(attrs.izz);
+  return !(ixx === 0 && iyy === 0 && izz === 0);
 }
 
-function fixInertiaTagsInText(text: string): string {
-  return text.replace(INERTIA_TAG_RE, fixInertiaTagMatch);
+function hasXmlnsOrDomArtifacts(xml: string): boolean {
+  return /xmlns/i.test(xml) || /\s+="[^"]*"/.test(xml) || /:[\w-]+=/.test(xml);
 }
 
-/** Remove empty-name / empty-value attributes that MuJoCo rejects. */
-export function stripMalformedEmptyNameAttributes(xml: string): string {
-  let result = xml;
-  result = result.replace(/\s+="[^"]*"/g, '');
-  result = result.replace(/\s+([a-zA-Z_][\w.-]*)=""/g, '');
-  result = result.replace(/\s+=\s*"[^"]*"/g, '');
-  return result;
+function hasBrokenInertialBlocks(xml: string): boolean {
+  for (const m of xml.matchAll(/<inertial\b[\s\S]*?<\/inertial>/gi)) {
+    const block = m[0]!;
+    const tags = [...block.matchAll(INERTIA_TAG_RE)].map((x) => x[0]!);
+    if (tags.length === 0) return true;
+    if (tags.length > 1) return true;
+    if (!isValidInertiaTag(tags[0]!)) return true;
+  }
+  return false;
+}
+
+function fixInertialBlock(block: string): string {
+  const tags = [...block.matchAll(INERTIA_TAG_RE)].map((m) => m[0]!);
+  let inertiaTag: string;
+  if (tags.length === 0) {
+    inertiaTag = formatInertiaTag({});
+  } else {
+    const preferred = tags.find((t) => isValidInertiaTag(t)) ?? tags[0]!;
+    inertiaTag = isValidInertiaTag(preferred) ? preferred : formatInertiaTag(parseAttrsFromTag(preferred));
+  }
+  const without = block.replace(INERTIA_TAG_RE, '');
+  return without.replace(/<\/inertial>/i, `  ${inertiaTag}\n  </inertial>`);
+}
+
+function fixBrokenInertialBlocksOnly(urdfText: string): string {
+  return urdfText.replace(/<inertial\b[\s\S]*?<\/inertial>/gi, (block) => fixInertialBlock(block));
+}
+
+/** MuJoCo WASM 要求自闭合标签为 `/>`，` />` 会解析出空属性名 */
+export function tightenSelfClosingTagsForMujoco(urdfText: string): string {
+  return urdfText
+    .replace(/ \/>/g, '/>')
+    .replace(/ ><\/(\w+)>/g, '/></$1>');
+}
+
+/** @deprecated 使用 {@link tightenSelfClosingTagsForMujoco} */
+export function tightenInertiaTagsForMujoco(urdfText: string): string {
+  return tightenSelfClosingTagsForMujoco(urdfText);
+}
+
+/** 仅修复 biped torso 全零惯量（O(1) 字符串替换，不扫描全文） */
+function fixTorsoZeroInertia(urdfText: string): string {
+  return urdfText.replace(
+    TORSO_ZERO_INERTIA_RE,
+    '$1 ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>',
+  );
 }
 
 /** Strip xmlns / prefixed tags produced by browser XMLSerializer. */
@@ -74,63 +119,44 @@ export function stripXmlNamespaces(xml: string): string {
   let result = xml.replace(/\s+xmlns(?::\w+)?="[^"]*"/gi, '');
   result = result.replace(/<(\/?)([\w-]+:)([\w-]+)/g, '<$1$3');
   result = result.replace(/([\s<])([\w-]+):([\w-]+)=/g, '$1$3=');
-  return stripMalformedEmptyNameAttributes(result);
-}
-
-function normalizeInertialInner(inner: string): string {
-  const inertiaMatches = [...inner.matchAll(INERTIA_TAG_RE)].map((m) => m[0]!);
-  const merged: Record<string, string> = {};
-  for (const tag of inertiaMatches) {
-    Object.assign(merged, parseAttrsFromTag(tag));
-  }
-  const inertiaTag =
-    inertiaMatches.length > 0 ? formatInertiaTag(merged) : formatInertiaTag({});
-  const withoutInertia = inner.replace(INERTIA_TAG_RE, '').trimEnd();
-  if (!withoutInertia) return inertiaTag;
-  return `${withoutInertia}\n      ${inertiaTag}`;
-}
-
-/**
- * 修复 MuJoCo 无法加载的 URDF（空/全零惯量、多行 inertia、重复 inertia、xmlns 等）。
- * 纯文本处理，避免浏览器 XMLSerializer 与测试环境 DOM 行为不一致。
- */
-export function sanitizeUrdfForMujoco(urdfText: string): string {
-  let result = stripXmlNamespaces(urdfText);
-  result = fixInertiaTagsInText(result);
-
-  result = result.replace(/<inertial\b[^>]*>([\s\S]*?)<\/inertial>/gi, (_block, inner: string) => {
-    const normalized = normalizeInertialInner(inner);
-    return `<inertial>${normalized}</inertial>`;
-  });
-
-  result = stripMalformedEmptyNameAttributes(result);
-  result = fixInertiaTagsInText(result);
-  result = result.replace(/(<inertia\b[^>]*\/>)\s*(<\/inertial>)/gi, '$1\n    $2');
+  result = result.replace(/\s+="[^"]*"/g, '');
+  result = result.replace(/\s+([a-zA-Z_][\w.-]*)=""/g, '');
   return result;
 }
 
-function lineNumberAt(urdfText: string, index: number): number {
-  return urdfText.slice(0, index).split('\n').length;
+/**
+ * MuJoCo 加载前 URDF 预处理：默认仅 strip xmlns + 修 torso + 收紧 inertia 空格。
+ * 只有 DOM round-trip / 空惯量等异常才做全文 inertia 修复。
+ */
+export function sanitizeUrdfForMujoco(urdfText: string): string {
+  let result = stripXmlDeclaration(urdfText);
+  result = stripXmlNamespaces(result);
+  result = fixTorsoZeroInertia(result);
+  result = tightenSelfClosingTagsForMujoco(result);
+  if (hasXmlnsOrDomArtifacts(urdfText) || hasBrokenInertialBlocks(result)) {
+    result = fixBrokenInertialBlocksOnly(result);
+    result = tightenSelfClosingTagsForMujoco(result);
+  }
+  return result;
 }
 
-/** 加载前校验所有 inertia 标签具备非空属性（失败时附带行号上下文） */
-export function validateUrdfInertiaForMujoco(urdfText: string): void {
-  const emptyName = urdfText.search(/\s+="[^"]*"/);
-  if (emptyName >= 0) {
-    throw new Error(
-      `URDF 含空属性名（约第 ${lineNumberAt(urdfText, emptyName)} 行），MuJoCo 无法加载`,
-    );
-  }
-  const strayEquals = urdfText.search(/\s+=\s*"[^"]*"/);
-  if (strayEquals >= 0) {
-    throw new Error(
-      `URDF 含无效属性片段（约第 ${lineNumberAt(urdfText, strayEquals)} 行），MuJoCo 无法加载`,
-    );
-  }
+function stripXmlDeclaration(urdfText: string): string {
+  return urdfText.replace(/^\uFEFF?<\?xml\b[^?]*\?>\s*/i, '');
+}
 
+/** 加载管线统一入口：去 XML 声明 + MuJoCo WASM 安全化 */
+export function prepareUrdfForMujocoLoad(urdfText: string): string {
+  return sanitizeUrdfForMujoco(urdfText);
+}
+
+/** 加载前校验（仅检查 <inertia> 标签，不误伤 <mass/> 等合法空格） */
+export function validateUrdfInertiaForMujoco(urdfText: string): void {
   for (const m of urdfText.matchAll(INERTIA_TAG_RE)) {
     const tag = m[0]!;
-    const line = lineNumberAt(urdfText, m.index ?? 0);
+    const line = urdfText.slice(0, m.index ?? 0).split('\n').length;
+    if (/<inertia\b[^>]*?\s+\/>/.test(tag) || /"\s+[>\/]/.test(tag)) {
+      throw new Error(`URDF <inertia> 在 / 前含空格（约第 ${line} 行）`);
+    }
     for (const attr of INERTIA_ATTRS) {
       const am = tag.match(new RegExp(`\\b${attr}="([^"]*)"`));
       if (!am) {
@@ -141,17 +167,8 @@ export function validateUrdfInertiaForMujoco(urdfText: string): void {
       }
     }
   }
-
-  for (const bm of urdfText.matchAll(/<inertial\b[^>]*>([\s\S]*?)<\/inertial>/gi)) {
-    const count = (bm[1]!.match(/<inertia\b/gi) ?? []).length;
-    if (count !== 1) {
-      const line = lineNumberAt(urdfText, bm.index ?? 0);
-      throw new Error(`<inertial> 块含 ${count} 个 <inertia>（约第 ${line} 行）`);
-    }
-  }
 }
 
-/** sanitize + validate，供负载编辑与 MuJoCo 加载统一入口 */
 export function finalizeUrdfForMujoco(urdfText: string): string {
   const sanitized = sanitizeUrdfForMujoco(urdfText);
   validateUrdfInertiaForMujoco(sanitized);

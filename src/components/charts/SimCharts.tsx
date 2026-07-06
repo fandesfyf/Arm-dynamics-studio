@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import {
   bundleFromRecorderDict,
   chartMetricLabel,
+  pickActiveSeries,
   type ChartMetric,
   type ChartSeriesBundle,
   type ChartSeriesInput,
 } from './chart-types';
 import type { RecorderDict } from '../../core/data-recorder';
+import { chartLiveBuffer } from '../../core/chart-live-buffer';
 import { useSessionStore } from '../../stores/session-store';
 import './charts.css';
 
@@ -25,7 +27,7 @@ const JOINT_COLORS = [
 
 const PLOT_MIN_HEIGHT = 80;
 
-function yRangePad(min: number, max: number): uPlot.Range.MinMax {
+function yRangePad(min: number, max: number): [number, number] {
   if (!Number.isFinite(min) || !Number.isFinite(max)) {
     return [-1, 1];
   }
@@ -34,7 +36,7 @@ function yRangePad(min: number, max: number): uPlot.Range.MinMax {
   return [min - pad, max + pad];
 }
 
-function xRangePad(min: number, max: number): uPlot.Range.MinMax {
+function xRangePad(min: number, max: number): [number, number] {
   if (!Number.isFinite(min) || !Number.isFinite(max)) {
     return [0, 1];
   }
@@ -149,6 +151,16 @@ export interface SimChartsProps {
   onRecorderWindowChange?: (sec: number) => void;
 }
 
+function chartDataFingerprint(data: ChartSeriesInput, metricKey = ''): string {
+  const n = data.times.length;
+  if (n === 0) return '0';
+  const rowN = data.actual[n - 1];
+  const tail = rowN ? rowN.join(',') : '';
+  const t0 = data.times[0] ?? 0;
+  const t1 = data.times[n - 1]!;
+  return `${metricKey}:${n}:${t0}:${t1}:${data.jointNames.join(',')}:${tail}`;
+}
+
 function buildUPlotPayload(
   data: ChartSeriesInput,
 ): {
@@ -156,12 +168,17 @@ function buildUPlotPayload(
   series: uPlot.Series[];
 } {
   const { times, jointNames, actual, desired } = data;
+  const n = times.length;
   const aligned: uPlot.AlignedData = [times];
   const series: uPlot.Series[] = [{}];
 
   for (let j = 0; j < jointNames.length; j++) {
     const color = JOINT_COLORS[j % JOINT_COLORS.length];
-    aligned.push(actual.map((row) => row[j] ?? 0));
+    const actualCol = new Array<number>(n);
+    for (let i = 0; i < n; i++) {
+      actualCol[i] = actual[i]?.[j] ?? 0;
+    }
+    aligned.push(actualCol);
     series.push({
       label: desired ? `${jointNames[j]} 实际` : jointNames[j],
       stroke: color,
@@ -169,7 +186,11 @@ function buildUPlotPayload(
     });
 
     if (desired) {
-      aligned.push(desired.map((row) => row[j] ?? 0));
+      const desiredCol = new Array<number>(n);
+      for (let i = 0; i < n; i++) {
+        desiredCol[i] = desired[i]?.[j] ?? 0;
+      }
+      aligned.push(desiredCol);
       series.push({
         label: `${jointNames[j]} 指令`,
         stroke: color,
@@ -182,14 +203,41 @@ function buildUPlotPayload(
   return { aligned, series };
 }
 
+function resolvePlotSeries(
+  data: ChartSeriesInput | null,
+  liveChart: boolean,
+  metric: ChartMetric,
+  jointNames: string[] | undefined,
+  selectedJoints: ReadonlySet<number>,
+): ChartSeriesInput | null {
+  if (liveChart) {
+    const dict = chartLiveBuffer.dict;
+    if (dict && dict.time.length > 0) {
+      const bundle = bundleFromRecorderDict(dict, jointNames);
+      return pickActiveSeries(bundle[metric], metric, jointNames, selectedJoints);
+    }
+  }
+  if (data && data.times.length > 0) {
+    return data;
+  }
+  const buf = chartLiveBuffer.dict;
+  if (buf && buf.time.length > 0) {
+    const bundle = bundleFromRecorderDict(buf, jointNames);
+    return pickActiveSeries(bundle[metric], metric, jointNames, selectedJoints);
+  }
+  return data;
+}
+
 interface UPlotPaneProps {
   data: ChartSeriesInput | null;
   minHeight?: number;
   /** 滑动时间窗口（秒）；有值时 X 轴锁定最近 N 秒 */
   windowSec?: number;
-  /** 采样计数变化时刷新曲线 */
-  sampleTick?: number;
   simRunning?: boolean;
+  liveChart?: boolean;
+  metric?: ChartMetric;
+  jointNames?: string[];
+  selectedJoints?: ReadonlySet<number>;
 }
 
 const PROGRAMMATIC_SCALE_MS = 100;
@@ -198,14 +246,24 @@ function UPlotPane({
   data,
   minHeight = PLOT_MIN_HEIGHT,
   windowSec,
-  sampleTick = 0,
   simRunning = false,
+  liveChart = false,
+  metric = 'position',
+  jointNames,
+  selectedJoints = new Set<number>(),
 }: UPlotPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const uPlotCtorRef = useRef<typeof uPlot | null>(null);
   const seriesKeyRef = useRef('');
+  const dataFingerprintRef = useRef('');
+  const liveRevisionRef = useRef(-1);
+  const rafRef = useRef<number | null>(null);
   const followLatestRef = useRef(true);
+  const jointNamesRef = useRef(jointNames);
+  const selectedJointsRef = useRef(selectedJoints);
+  jointNamesRef.current = jointNames;
+  selectedJointsRef.current = selectedJoints;
   const programmaticUntilRef = useRef(0);
   const prevSimRunningRef = useRef(false);
   const interactionCtxRef = useRef({
@@ -217,7 +275,8 @@ function UPlotPane({
   });
   const [uPlotReady, setUPlotReady] = useState(false);
 
-  const hasData = Boolean(data && data.times.length > 0);
+  const plotData = resolvePlotSeries(data, liveChart, metric, jointNames, selectedJoints);
+  const hasData = Boolean(plotData && plotData.times.length > 0);
 
   const markProgrammaticScale = useCallback(() => {
     programmaticUntilRef.current = performance.now() + PROGRAMMATIC_SCALE_MS;
@@ -265,6 +324,9 @@ function UPlotPane({
 
   useEffect(() => {
     return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
       plotRef.current?.destroy();
       plotRef.current = null;
     };
@@ -278,83 +340,162 @@ function UPlotPane({
     return { width, height };
   }, [minHeight]);
 
+  const ensurePlotMounted = useCallback(
+    (series: ChartSeriesInput): uPlot | null => {
+      const el = containerRef.current;
+      const uPlotCtor = uPlotCtorRef.current;
+      if (!el || !uPlotCtor) return null;
+
+      const { aligned, series: uSeries } = buildUPlotPayload(series);
+      const { width, height } = measure();
+      const seriesKey = `${uSeries.length}:${series.jointNames.join(',')}`;
+      const seriesChanged = seriesKey !== seriesKeyRef.current;
+      if (seriesChanged) {
+        followLatestRef.current = true;
+        seriesKeyRef.current = seriesKey;
+        dataFingerprintRef.current = '';
+        liveRevisionRef.current = -1;
+      }
+
+      const opts: uPlot.Options = {
+        width,
+        height,
+        series: uSeries,
+        padding: [12, 12, 8, 6],
+        scales: {
+          x: { time: false, auto: true },
+          y: {
+            auto: true,
+            range: (_u, dataMin, dataMax) => yRangePad(dataMin, dataMax),
+          },
+        },
+        axes: [
+          {
+            stroke: '#6b6b88',
+            grid: { show: true, stroke: '#242436' },
+            size: 28,
+            gap: 4,
+            values: (_u, splits) => splits.map((v) => v.toFixed(2)),
+          },
+          {
+            stroke: '#6b6b88',
+            grid: { show: true, stroke: '#242436' },
+            size: 58,
+            gap: 6,
+            values: (_u, splits) => splits.map((v) => (Math.abs(v) >= 100 ? v.toExponential(1) : v.toFixed(3))),
+          },
+        ],
+        legend: { show: true },
+        cursor: {
+          drag: { x: true, y: true, setScale: true },
+        },
+        plugins: createInteractionPlugins(() => interactionCtxRef.current),
+      };
+
+      if (!plotRef.current || seriesChanged) {
+        plotRef.current?.destroy();
+        plotRef.current = new uPlotCtor(opts, aligned, el);
+        dataFingerprintRef.current = chartDataFingerprint(series, metric);
+        applyFollowWindow(plotRef.current, series.times);
+      }
+      return plotRef.current;
+    },
+    [applyFollowWindow, measure, metric],
+  );
+
+  const showPlotShell = hasData || liveChart;
+
   useEffect(() => {
-    const el = containerRef.current;
-    const uPlotCtor = uPlotCtorRef.current;
-    if (!el || !hasData || !data || !uPlotCtor) {
-      if (!hasData) {
+    if (!uPlotReady || !plotData || !hasData) {
+      if (!liveChart && !hasData) {
         plotRef.current?.destroy();
         plotRef.current = null;
         seriesKeyRef.current = '';
+        dataFingerprintRef.current = '';
+        liveRevisionRef.current = -1;
       }
       return;
     }
-
-    const { aligned, series } = buildUPlotPayload(data);
-    const { width, height } = measure();
-    const seriesKey = `${series.length}:${data.jointNames.join(',')}`;
-    const seriesChanged = seriesKey !== seriesKeyRef.current;
-    if (seriesChanged) {
-      followLatestRef.current = true;
-      seriesKeyRef.current = seriesKey;
-    }
-
-    const opts: uPlot.Options = {
-      width,
-      height,
-      series,
-      padding: [12, 12, 0, 0],
-      scales: {
-        x: { time: false, auto: true },
-        y: {
-          auto: true,
-          range: (_u, dataMin, dataMax) => yRangePad(dataMin, dataMax),
-        },
-      },
-      axes: [
-        {
-          stroke: '#6b6b88',
-          grid: { show: true, stroke: '#242436' },
-          size: 28,
-          gap: 4,
-          values: (_u, splits) => splits.map((v) => v.toFixed(2)),
-        },
-        {
-          stroke: '#6b6b88',
-          grid: { show: true, stroke: '#242436' },
-          size: 48,
-          gap: 4,
-          values: (_u, splits) => splits.map((v) => (Math.abs(v) >= 100 ? v.toExponential(1) : v.toFixed(3))),
-        },
-      ],
-      legend: { show: true },
-      cursor: {
-        drag: { x: true, y: true, setScale: true },
-      },
-      plugins: createInteractionPlugins(() => interactionCtxRef.current),
-    };
-
-    if (!plotRef.current || seriesChanged) {
-      plotRef.current?.destroy();
-      plotRef.current = new uPlotCtor(opts, aligned, el);
-      applyFollowWindow(plotRef.current, data.times);
-    }
-  }, [applyFollowWindow, data, hasData, measure, uPlotReady]);
+    ensurePlotMounted(plotData);
+  }, [ensurePlotMounted, hasData, liveChart, plotData, uPlotReady]);
 
   useEffect(() => {
+    if (liveChart) return;
     const plot = plotRef.current;
-    if (!plot || !hasData || !data) return;
+    if (!plot || !hasData || !plotData) return;
 
-    const { aligned } = buildUPlotPayload(data);
-    plot.setData(aligned, false);
-    if (followLatestRef.current) {
-      applyFollowWindow(plot, data.times);
+    const fp = chartDataFingerprint(plotData, metric);
+    if (fp === dataFingerprintRef.current) return;
+
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
     }
-  }, [applyFollowWindow, data, hasData, sampleTick]);
+
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const live = plotRef.current;
+      if (!live || !plotData) return;
+      const { aligned } = buildUPlotPayload(plotData);
+      live.setData(aligned, false);
+      dataFingerprintRef.current = fp;
+      if (followLatestRef.current) {
+        applyFollowWindow(live, plotData.times);
+      }
+    });
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [applyFollowWindow, hasData, liveChart, metric, plotData]);
+
+  useEffect(() => {
+    if (!liveChart) return;
+
+    let liveRaf = 0;
+    const tick = () => {
+      const buf = chartLiveBuffer;
+      if (buf.revision !== liveRevisionRef.current && buf.dict && buf.dict.time.length > 0) {
+        liveRevisionRef.current = buf.revision;
+        const series = resolvePlotSeries(
+          data,
+          true,
+          metric,
+          jointNamesRef.current,
+          selectedJointsRef.current,
+        );
+        if (series && series.times.length > 0) {
+          const plot = plotRef.current ?? ensurePlotMounted(series);
+          if (plot) {
+            const fp = chartDataFingerprint(series, metric);
+            if (fp !== dataFingerprintRef.current) {
+              const { aligned } = buildUPlotPayload(series);
+              plot.setData(aligned, false);
+              dataFingerprintRef.current = fp;
+              if (followLatestRef.current) {
+                applyFollowWindow(plot, series.times);
+              }
+            }
+          }
+        }
+      }
+      liveRaf = requestAnimationFrame(tick);
+    };
+    liveRaf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(liveRaf);
+  }, [applyFollowWindow, data, ensurePlotMounted, liveChart, metric]);
+
+  useEffect(() => {
+    if (liveChart) {
+      liveRevisionRef.current = -1;
+    }
+  }, [liveChart]);
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || !hasData) return;
+    if (!el || !showPlotShell) return;
 
     const ro = new ResizeObserver(() => {
       if (!plotRef.current || !containerRef.current) return;
@@ -363,16 +504,16 @@ function UPlotPane({
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [hasData, measure]);
+  }, [measure, showPlotShell]);
 
-  if (!hasData) {
+  if (!showPlotShell) {
     return <div className="sim-charts-empty">暂无仿真数据 — 运行仿真后曲线将实时更新</div>;
   }
 
   return <div ref={containerRef} className="sim-charts-plot" />;
 }
 
-export function SimCharts({
+export const SimCharts = memo(function SimCharts({
   recorderDict,
   series,
   jointNames,
@@ -386,7 +527,6 @@ export function SimCharts({
 }: SimChartsProps) {
   const [tab, setTab] = useState<ChartMetric>('position');
   const [selectedJoints, setSelectedJoints] = useState<Set<number>>(new Set([0, 1, 2]));
-  const sampleTick = useSessionStore((s) => s.recorder.sampleCount);
   const simRunning = useSessionStore((s) => s.simStatus === 'running');
 
   const bundle = useMemo((): ChartSeriesBundle => {
@@ -421,18 +561,7 @@ export function SimCharts({
 
   const activeData = useMemo(() => {
     const raw = bundle[tab];
-    if (tab === 'ee') return raw;
-    if (!jointNames?.length) return raw;
-    const indices = [...selectedJoints].sort((a, b) => a - b);
-    if (indices.length === 0) return raw;
-    const names = indices.map((i) => jointNames[i] ?? `j${i}`);
-    const pick = (rows: number[][]) => rows.map((row) => indices.map((i) => row[i] ?? 0));
-    return {
-      times: raw.times,
-      jointNames: names,
-      actual: pick(raw.actual),
-      desired: raw.desired ? pick(raw.desired) : null,
-    };
+    return pickActiveSeries(raw, tab, jointNames, selectedJoints);
   }, [bundle, tab, jointNames, selectedJoints]);
 
   const toggleJoint = (index: number) => {
@@ -536,10 +665,13 @@ export function SimCharts({
           data={activeData}
           minHeight={plotMinHeight}
           windowSec={recorderWindowSec}
-          sampleTick={sampleTick}
           simRunning={simRunning}
+          liveChart={simRunning}
+          metric={tab}
+          jointNames={jointNames}
+          selectedJoints={selectedJoints}
         />
       </div>
     </div>
   );
-}
+});

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { CONTROLLER_OMEGA } from '../core/controller';
-import { vecGet } from '../types/mujoco';
+import { publishChartLiveDict, clearChartLiveBuffer } from '../core/chart-live-buffer';
+import { DataRecorder, type RecorderDict } from '../core/data-recorder';
+import { vecGet, vecSet } from '../types/mujoco';
 import { RobotSession, createForwardKinematics, type ForwardKinematics } from '../core/robot-session';
 import { createSimulation, type IKSolver, type SimulationEngine } from '../core/simulation';
 import { InverseKinematics } from '../core/inverse-kinematics';
@@ -8,11 +10,14 @@ import { createJointMapAdapter } from '../pinocchio/joint-map-adapter';
 import { Trajectory } from '../core/trajectory';
 import { asTrajectorySampler } from '../core/planner';
 import { exportToCsv, csvToBlob } from '../export/csv-exporter';
+import { downloadMotionTargetsCsv, parseMotionTargetsCsv } from '../export/motion-target-csv';
 import { useSessionStore, type RobotInfo } from '../stores/session-store';
+import type { ControlUiPreserve } from '../stores/session-store';
 import type { PayloadRecord, Wrench6 } from '../core/payload-editor';
-import { loadDefaultBipedUpperBody } from '../utils/biped-default-loader';
-import { ensureFixedBase, resolveEndEffectorJointName } from '../utils/urdf-base-fixture';
-import { finalizeUrdfForMujoco } from '../utils/urdf-sanitize';
+import { loadDefaultBipedUpperBody, loadDefaultBipedMeshes } from '../utils/biped-default-loader';
+import { detectEndEffectorLink, ensureFixedBase, parseLinkNames, resolveEndEffectorJointName } from '../utils/urdf-base-fixture';
+import { prepareUrdfForMujocoLoad } from '../utils/urdf-sanitize';
+import { releaseActiveMujocoHandles } from '../mujoco/loader';
 import { actuatedJointsToQpos, applyActuatedGainsToController, nvGainsToActuated, qposToActuatedJoints } from '../utils/joint-qpos';
 import { ClosedChainIkBridge } from '../ik/closed-chain-ik-bridge';
 import { createHybridIkSolver } from '../ik/hybrid-ik-solver';
@@ -39,6 +44,20 @@ import {
 
 /** Max UI refresh rate during realtime / interpolation loops (~12 Hz). */
 const UI_UPDATE_INTERVAL_MS = 80;
+/** 曲线缓冲刷新间隔（~60 Hz，与显示帧率对齐） */
+const CHART_FLUSH_INTERVAL_MS = 16;
+
+function waitAnimationFrames(count: number): Promise<void> {
+  return new Promise((resolve) => {
+    let left = count;
+    const step = () => {
+      left -= 1;
+      if (left <= 0) resolve();
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
 
 interface LastGoodSnapshot {
   urdfText: string;
@@ -99,6 +118,44 @@ function restoreSnapshot(snapshot: LastGoodSnapshot, errorMessage: string): void
   });
 }
 
+function captureControlUiPreserve(
+  state: ReturnType<typeof useSessionStore.getState>,
+  engine: SimulationEngine | null,
+): ControlUiPreserve {
+  const recorderDict = engine?.recorder.toDict() ?? state.recorderDict;
+  const times = recorderDict?.time ?? [];
+  return {
+    motionTargets: state.motionTargets.map((t) => ({
+      ...t,
+      jointPositions: [...t.jointPositions],
+      eePosition: [...t.eePosition] as Vec3,
+      eeQuaternion: [...t.eeQuaternion] as Quat,
+      eeSceneWorld: [...t.eeSceneWorld] as [number, number, number],
+    })),
+    jointTargets: [...state.jointTargets],
+    commandedJointPositions: [...state.commandedJointPositions],
+    referenceJointPositions: [...state.referenceJointPositions],
+    jointPositions: [...state.jointPositions],
+    jointKp: [...state.jointKp],
+    jointKd: [...state.jointKd],
+    eeTarget: [...state.eeTarget] as Vec3,
+    eeTargetQuat: [...state.eeTargetQuat] as Quat,
+    eeTargetDirty: state.eeTargetDirty,
+    controlLayer: state.controlLayer,
+    controlMode: state.controlMode,
+    jointMaxVelocity: state.jointMaxVelocity,
+    interpProfile: state.interpProfile,
+    trajectoryWaypoints: state.trajectoryWaypoints.map((w) => ({ ...w })),
+    recorder: {
+      sampleCount: times.length,
+      lastTime: times.length > 0 ? times[times.length - 1]! : null,
+    },
+    recorderDict: recorderDict,
+    simTime: engine?.simTime ?? state.simTime,
+    simStepCount: state.simStepCount,
+  };
+}
+
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -106,6 +163,28 @@ function downloadBlob(blob: Blob, filename: string): void {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+const EMPTY_RECORDER_DICT: RecorderDict = {
+  time: [],
+  qpos: [],
+  qvel: [],
+  tau: [],
+  ee_pos: [],
+  ee_quat: [],
+};
+
+/** MuJoCo WASM 单例 + VFS 非线程安全：串行化所有 loadRobot */
+let robotLoadChain: Promise<unknown> = Promise.resolve();
+
+function enqueueRobotLoad<T>(task: () => Promise<T>): Promise<T> {
+  const run = () => task();
+  const result = robotLoadChain.then(run, run);
+  robotLoadChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 export function useSimulation() {
@@ -119,9 +198,17 @@ export function useSimulation() {
   const pauseRef = useRef(false);
   const loopActiveRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
+  const chartLoopActiveRef = useRef(false);
+  const chartRafIdRef = useRef<number | null>(null);
+  const lastChartFlushMsRef = useRef(0);
+  /** 上次刷入曲线缓冲的墙钟时间（秒） */
+  const lastChartFlushTimeRef = useRef<number | null>(null);
+  const chartWallRecorderRef = useRef(new DataRecorder());
+  const chartWallEpochSecRef = useRef(0);
   const meshesRef = useRef<Map<string, Uint8Array>>(new Map());
   const lastUiUpdateRef = useRef(0);
   const lastGoodSnapshotRef = useRef<LastGoodSnapshot | null>(null);
+  const loadGenerationRef = useRef(0);
   const pendingEeSyncRef = useRef(false);
 
   const {
@@ -131,7 +218,7 @@ export function useSimulation() {
     setJointPositions,
     setSimStatus,
     updateRecorder,
-    syncSimFrame,
+    syncSimUiFrame,
     setSimRuntime,
     setPaused,
     trajectoryWaypoints,
@@ -225,24 +312,145 @@ export function useSimulation() {
   }, [rebuildClosedChainIk, refreshHybridIkSolver]);
 
   const applyRecorderWindow = useCallback((engine: SimulationEngine) => {
-    engine.recorder.setMaxDurationSec(useSessionStore.getState().recorderWindowSec);
+    const sec = useSessionStore.getState().recorderWindowSec;
+    engine.recorder.setMaxDurationSec(sec);
+    chartWallRecorderRef.current.setMaxDurationSec(sec);
+  }, []);
+
+  const resetChartWallRecorder = useCallback(() => {
+    chartWallRecorderRef.current.clear();
+    chartWallEpochSecRef.current = performance.now() / 1000;
+    chartWallRecorderRef.current.setMaxDurationSec(useSessionStore.getState().recorderWindowSec);
   }, []);
 
   const syncRecorder = useCallback(
     (engine: SimulationEngine) => {
       applyRecorderWindow(engine);
-      const times = engine.recorder.getTimes();
+      const dict = engine.recorder.toDict();
       updateRecorder(
         {
           sampleCount: engine.recorder.getNumFrames(),
-          lastTime: times.length > 0 ? times[times.length - 1]! : null,
+          lastTime: engine.recorder.getLastTime(),
         },
-        engine.recorder.toDict(),
+        dict,
       );
+      publishChartLiveDict(dict);
       setSimRuntime(engine.simTime, engine.recorder.getNumFrames());
     },
     [applyRecorderWindow, setSimRuntime, updateRecorder],
   );
+
+  /** 将墙钟曲线缓冲同步到 store，供停止/暂停后静态显示 */
+  const syncChartDisplayFromWall = useCallback(
+    (engine?: SimulationEngine | null) => {
+      const eng = engine ?? engineRef.current;
+      if (eng) {
+        applyRecorderWindow(eng);
+      } else {
+        chartWallRecorderRef.current.setMaxDurationSec(useSessionStore.getState().recorderWindowSec);
+      }
+
+      const wall = chartWallRecorderRef.current;
+      const wallFrames = wall.getNumFrames();
+      if (wallFrames > 0) {
+        const dict = wall.toDictForDisplay();
+        updateRecorder(
+          {
+            sampleCount: wallFrames,
+            lastTime: wall.getLastTime(),
+          },
+          dict,
+        );
+        publishChartLiveDict(dict);
+        if (eng) {
+          const displayTime = wall.getLastTime() ?? eng.simTime;
+          setSimRuntime(displayTime, wallFrames);
+        }
+        return;
+      }
+
+      if (eng) {
+        syncRecorder(eng);
+      }
+    },
+    [applyRecorderWindow, setSimRuntime, syncRecorder, updateRecorder],
+  );
+
+  const flushChartLive = useCallback(
+    (engine: SimulationEngine) => {
+      const wallTime = performance.now() / 1000 - chartWallEpochSecRef.current;
+      if (lastChartFlushTimeRef.current !== null && wallTime <= lastChartFlushTimeRef.current) {
+        return;
+      }
+      lastChartFlushTimeRef.current = wallTime;
+      applyRecorderWindow(engine);
+      chartWallRecorderRef.current.record({
+        ...engine.sampleForChart(),
+        time: wallTime,
+      });
+      publishChartLiveDict(chartWallRecorderRef.current.toDictForDisplay());
+    },
+    [applyRecorderWindow],
+  );
+
+  const stopChartSyncLoop = useCallback(() => {
+    chartLoopActiveRef.current = false;
+    if (chartRafIdRef.current !== null) {
+      cancelAnimationFrame(chartRafIdRef.current);
+      chartRafIdRef.current = null;
+    }
+    lastChartFlushTimeRef.current = null;
+  }, []);
+
+  const ensureChartSyncLoop = useCallback(() => {
+    if (chartLoopActiveRef.current) return;
+    chartLoopActiveRef.current = true;
+    lastChartFlushMsRef.current = 0;
+
+    const wall = chartWallRecorderRef.current;
+    const lastWallTime = wall.getLastTime();
+    const hasPriorWallData = wall.getNumFrames() > 0 && lastWallTime !== null;
+
+    if (hasPriorWallData) {
+      chartWallEpochSecRef.current = performance.now() / 1000 - lastWallTime;
+      lastChartFlushTimeRef.current = lastWallTime;
+      wall.setMaxDurationSec(useSessionStore.getState().recorderWindowSec);
+      publishChartLiveDict(wall.toDictForDisplay());
+    } else {
+      lastChartFlushTimeRef.current = null;
+      resetChartWallRecorder();
+      clearChartLiveBuffer();
+      updateRecorder({ sampleCount: 0, lastTime: null }, EMPTY_RECORDER_DICT);
+      const eng = engineRef.current;
+      if (eng) {
+        eng.recorder.clear();
+      }
+    }
+
+    const eng = engineRef.current;
+    if (eng) {
+      applyRecorderWindow(eng);
+      flushChartLive(eng);
+    }
+
+    const chartTick = () => {
+      if (!chartLoopActiveRef.current) {
+        chartRafIdRef.current = null;
+        return;
+      }
+      const state = useSessionStore.getState();
+      if (state.simStatus === 'running' && !pauseRef.current) {
+        const now = performance.now();
+        if (now - lastChartFlushMsRef.current >= CHART_FLUSH_INTERVAL_MS) {
+          lastChartFlushMsRef.current = now;
+          const engine = engineRef.current;
+          if (engine) flushChartLive(engine);
+        }
+      }
+      chartRafIdRef.current = requestAnimationFrame(chartTick);
+    };
+    chartRafIdRef.current = requestAnimationFrame(chartTick);
+  }, [applyRecorderWindow, flushChartLive, resetChartWallRecorder, updateRecorder]);
 
   const pushSimUi = useCallback(
     (session: RobotSession, engine: SimulationEngine, force = false) => {
@@ -252,19 +460,17 @@ export function useSimulation() {
       }
       lastUiUpdateRef.current = now;
       applyRecorderWindow(engine);
-      const times = engine.recorder.getTimes();
-      syncSimFrame(
+      syncSimUiFrame(
         qposToActuatedJoints(session),
         engine.simTime,
         engine.recorder.getNumFrames(),
         {
           sampleCount: engine.recorder.getNumFrames(),
-          lastTime: times.length > 0 ? times[times.length - 1]! : null,
+          lastTime: engine.recorder.getLastTime(),
         },
-        engine.recorder.toDict(),
       );
     },
-    [applyRecorderWindow, syncSimFrame],
+    [applyRecorderWindow, syncSimUiFrame],
   );
 
   const cancelRafLoop = useCallback(() => {
@@ -481,6 +687,30 @@ export function useSimulation() {
     engine.externalWrenches = new Map(useSessionStore.getState().externalWrenches);
   }, []);
 
+  /** 停止 RAF 循环并清除取消标志，供插值独占 engine 步进 */
+  const prepareInterpolationRun = useCallback(
+    (engine: SimulationEngine | null) => {
+      cancelRafLoop();
+      cancelRef.current = false;
+      pauseRef.current = false;
+      setPaused(false);
+      const state = useSessionStore.getState();
+      if (
+        state.jointPositions.length > 0 &&
+        state.commandedJointPositions.length !== state.jointPositions.length
+      ) {
+        useSessionStore.getState().setCommandedJointPositions([...state.jointPositions]);
+      }
+      if (engine) {
+        engine.controlDt = state.controlDt;
+        engine.recordingEnabled = !state.recorderPaused;
+        applyRecorderWindow(engine);
+        syncExternalWrenches(engine);
+      }
+    },
+    [applyRecorderWindow, cancelRafLoop, setPaused, syncExternalWrenches],
+  );
+
   const syncExternalWrenchesFromStore = useCallback(() => {
     const engine = engineRef.current;
     if (engine) {
@@ -517,6 +747,7 @@ export function useSimulation() {
       let accumulated = 0;
       let lastTs = performance.now();
       lastUiUpdateRef.current = 0;
+      ensureChartSyncLoop();
 
       const tick = (ts: number) => {
         if (!loopActiveRef.current || cancelRef.current) {
@@ -538,6 +769,7 @@ export function useSimulation() {
         const dt = engine.controlDt;
         let stepped = false;
         while (accumulated >= dt && loopActiveRef.current && !cancelRef.current) {
+          if (sessionRef.current !== session) break;
           accumulated -= dt;
           const qDesired = resolveDesired();
           if (!qDesired) break;
@@ -547,7 +779,7 @@ export function useSimulation() {
           });
         }
 
-        if (stepped) {
+        if (stepped && sessionRef.current === session) {
           pushSimUi(session, engine);
         }
 
@@ -564,6 +796,7 @@ export function useSimulation() {
     [
       applyRecorderWindow,
       cancelRafLoop,
+      ensureChartSyncLoop,
       pushSimUi,
       setPaused,
       setSimStatus,
@@ -590,63 +823,101 @@ export function useSimulation() {
     [resolveQDesired, runSimulationLoop],
   );
 
-  const ensureSimRunning = useCallback(() => {
-    if (!loopActiveRef.current) {
-      const mode = useSessionStore.getState().controlMode;
-      if (mode === 'interpolate') {
-        runHoldLoop();
-      } else {
-        runContinuousLoop();
-      }
-    }
-  }, [runContinuousLoop, runHoldLoop]);
-
   const loadRobot = useCallback(
-    async (urdfText: string, urdfFileName: string, meshes?: Map<string, Uint8Array>, forceBaseLink?: string) => {
-      setLoading(true, '正在加载 MuJoCo + Pinocchio…');
-      cancelRef.current = true;
-      cancelRafLoop();
-      pauseRef.current = false;
-      setPaused(false);
-
-      const prevSession = sessionRef.current;
-      const prevEngine = engineRef.current;
-      const prevIk = ikRef.current;
-      const prevIkSolver = ikSolverRef.current;
-      const prevFk = fkRef.current;
-      const rollbackSnapshot =
-        prevSession && prevEngine && prevIk && prevIkSolver
-          ? captureSnapshot(prevSession, prevEngine, prevIk, prevIkSolver, prevFk)
-          : lastGoodSnapshotRef.current;
-
-      let newSession: RobotSession | null = null;
-
-      try {
-        const prevUrdfFileName = useSessionStore.getState().urdfFileName;
-        const meshMap = meshes ?? new Map();
-        meshesRef.current = meshMap;
-
-        const resolvedBase = forceBaseLink ?? baseLink;
-        const fixture = ensureFixedBase(finalizeUrdfForMujoco(urdfText), resolvedBase || undefined);
-        const resolvedBaseLink = fixture.baseLink;
-        const resolvedEeLink =
-          endEffectorLink !== 'ee_link'
-            ? endEffectorLink
-            : fixture.endEffectorLink ?? endEffectorLink;
-
-        setBaseLink(resolvedBaseLink);
-        if (fixture.endEffectorLink && endEffectorLink === 'ee_link') {
-          setEndEffectorLink(fixture.endEffectorLink);
+    async (
+      urdfText: string,
+      urdfFileName: string,
+      meshes?: Map<string, Uint8Array>,
+      forceBaseLink?: string,
+      loadPhase: 'initial' | 'payload-reload' | 'manual' = 'manual',
+      isRollbackReload = false,
+    ) => {
+      return enqueueRobotLoad(async () => {
+        const loadId = ++loadGenerationRef.current;
+        setLoading(true, '正在加载 MuJoCo + Pinocchio…');
+        loopActiveRef.current = false;
+        cancelRef.current = true;
+        cancelRafLoop();
+        if (engineRef.current) {
+          engineRef.current.isRunning = false;
         }
 
-        const session = await RobotSession.create({
-          urdfXml: fixture.urdfText,
-          urdfFileName,
-          meshes: meshMap,
-          endEffectorLink: resolvedEeLink,
-          baseLink: resolvedBaseLink,
-        });
-        newSession = session;
+        const prevSession = sessionRef.current;
+        const prevEngine = engineRef.current;
+        const prevIk = ikRef.current;
+        const prevIkSolver = ikSolverRef.current;
+        const prevFk = fkRef.current;
+        sessionRef.current = null;
+        engineRef.current = null;
+        ikRef.current = null;
+        ikSolverRef.current = null;
+        fkRef.current = null;
+        if (prevSession) {
+          await waitAnimationFrames(2);
+        }
+
+        const rollbackSnapshot =
+          !isRollbackReload && prevSession && prevEngine && prevIk && prevIkSolver
+            ? captureSnapshot(prevSession, prevEngine, prevIk, prevIkSolver, prevFk)
+            : !isRollbackReload
+              ? lastGoodSnapshotRef.current
+              : null;
+
+        const preserveUi =
+          loadPhase === 'payload-reload' && !isRollbackReload
+            ? captureControlUiPreserve(useSessionStore.getState(), prevEngine)
+            : null;
+
+        let newSession: RobotSession | null = null;
+
+        try {
+          pauseRef.current = false;
+          setPaused(false);
+
+          if (!isRollbackReload) {
+            prevSession?.dispose();
+            if (prevSession) {
+              await waitAnimationFrames(1);
+            }
+          }
+
+          const prevUrdfFileName = useSessionStore.getState().urdfFileName;
+          const meshMap = meshes ?? new Map();
+          meshesRef.current = meshMap;
+
+          const resolvedBase = forceBaseLink ?? baseLink;
+          const fixture = ensureFixedBase(urdfText, resolvedBase || undefined);
+          const storeUrdfText = prepareUrdfForMujocoLoad(fixture.urdfText);
+          const resolvedBaseLink = fixture.baseLink;
+          const urdfLinks = parseLinkNames(storeUrdfText).filter((name) => name !== 'world');
+          const detectedEe = fixture.endEffectorLink ?? detectEndEffectorLink(storeUrdfText);
+          const currentEe = useSessionStore.getState().endEffectorLink;
+          const resolvedEeLink =
+            currentEe && urdfLinks.includes(currentEe)
+              ? currentEe
+              : (detectedEe ?? urdfLinks[0] ?? currentEe);
+
+          setBaseLink(resolvedBaseLink);
+          if (resolvedEeLink && resolvedEeLink !== currentEe) {
+            setEndEffectorLink(resolvedEeLink);
+          }
+
+          releaseActiveMujocoHandles();
+
+          const session = await RobotSession.create({
+            urdfXml: storeUrdfText,
+            urdfFileName,
+            meshes: meshMap,
+            endEffectorLink: resolvedEeLink,
+            baseLink: resolvedBaseLink,
+            loadPhase,
+            urdfPrepared: true,
+          });
+          if (loadId !== loadGenerationRef.current) {
+            session.dispose();
+            return;
+          }
+          newSession = session;
 
         const engine = createSimulation(session);
         engine.controlDt = controlDt;
@@ -663,7 +934,7 @@ export function useSimulation() {
         if (session.jointNames.length > 0) {
           configureEndEffector(
             useSessionStore.getState().endEffectorLink,
-            fixture.urdfText,
+            storeUrdfText,
             session,
             ik,
           );
@@ -680,7 +951,6 @@ export function useSimulation() {
         const ikSolver = createHybridIkSolver(session, ik, closedChainIkRef.current);
         const newFk = fkRef.current;
 
-        prevSession?.dispose();
         sessionRef.current = session;
         engineRef.current = engine;
         ikRef.current = ik;
@@ -691,33 +961,61 @@ export function useSimulation() {
         useSessionStore.getState().setEeGizmoVisible(false);
 
         engine.reset();
-        const qpos = qposToActuatedJoints(session);
+        if (preserveUi?.recorderDict && preserveUi.recorderDict.time.length > 0) {
+          engine.recorder.loadFromDict(preserveUi.recorderDict);
+          engine.simTime = preserveUi.simTime;
+        }
+
+        const qpos = preserveUi ? preserveUi.jointPositions : qposToActuatedJoints(session);
+        if (preserveUi) {
+          const fullQ = actuatedJointsToQpos(session, preserveUi.commandedJointPositions);
+          vecSet(session.data.qpos, fullQ, session.nq);
+          session.mujoco.mj_forward(session.model, session.data);
+        }
+
         const qInit = vecGet(session.data.qpos, session.nq);
         const kdDamping = useSessionStore.getState().controllerKdDamping;
-        engine.recomputeAutoGains(qInit, { kdDamping, omega: CONTROLLER_OMEGA });
+        if (preserveUi && preserveUi.jointKp.length === session.jointNames.length) {
+          applyActuatedGainsToController(
+            session,
+            { getGains: () => engine.getGains(), setGains: (kp, kd) => engine.setGains(kp, kd) },
+            preserveUi.jointKp,
+            preserveUi.jointKd,
+          );
+        } else {
+          engine.recomputeAutoGains(qInit, { kdDamping, omega: CONTROLLER_OMEGA });
+        }
         const fk = fkRef.current ?? session.forwardKinematics;
         const ee = fk.compute(vecGet(session.data.qpos, session.nq));
         const robotName =
           urdfText.match(/<robot\s+name="([^"]+)"/)?.[1] ?? urdfFileName.replace(/\.urdf$/i, '');
 
-        setSimRuntime(0, 0);
+        if (preserveUi) {
+          setSimRuntime(preserveUi.simTime, preserveUi.simStepCount);
+        } else {
+          setSimRuntime(0, 0);
+        }
         const gains = nvGainsToActuated(session, engine.getGains().kp, engine.getGains().kd);
         useSessionStore.getState().setAllJointGains(gains.kp, gains.kd);
-        setRobotLoaded({
-          robotInfo: {
-            name: robotName,
-            dof: session.jointNames.length,
-            jointNames: session.jointNames,
-            lowerLimits: session.pinocchioBundle.lowerLimits,
-            upperLimits: session.pinocchioBundle.upperLimits,
-            eePos: ee.pos as Vec3,
-            eeQuat: ee.quat as Quat,
+        if (loadId !== loadGenerationRef.current) return;
+        setRobotLoaded(
+          {
+            robotInfo: {
+              name: robotName,
+              dof: session.jointNames.length,
+              jointNames: session.jointNames,
+              lowerLimits: session.pinocchioBundle.lowerLimits,
+              upperLimits: session.pinocchioBundle.upperLimits,
+              eePos: preserveUi ? (preserveUi.eeTarget as Vec3) : (ee.pos as Vec3),
+              eeQuat: preserveUi ? (preserveUi.eeTargetQuat as Quat) : (ee.quat as Quat),
+            },
+            jointPositions: preserveUi ? preserveUi.jointPositions : qpos,
+            urdfText: storeUrdfText,
+            urdfFileName,
+            meshAssets: meshMap,
           },
-          jointPositions: qpos,
-          urdfText: fixture.urdfText,
-          urdfFileName,
-          meshAssets: meshMap,
-        });
+          preserveUi ? { preserve: preserveUi } : undefined,
+        );
 
         if (prevUrdfFileName != null && prevUrdfFileName !== urdfFileName) {
           useSessionStore.getState().clearPayloadRecords();
@@ -733,27 +1031,52 @@ export function useSimulation() {
             fkRef.current,
           );
         }
-      } catch (e) {
-        newSession?.dispose();
+        cancelRef.current = false;
+        loopActiveRef.current = false;
+        } catch (e) {
+          newSession?.dispose();
+          if (loadId !== loadGenerationRef.current) return;
 
-        const msg = e instanceof Error ? e.message : String(e);
-        if (rollbackSnapshot) {
-          sessionRef.current = rollbackSnapshot.session;
-          engineRef.current = rollbackSnapshot.engine;
-          ikRef.current = rollbackSnapshot.ik;
-          ikSolverRef.current = rollbackSnapshot.ikSolver;
-          fkRef.current = rollbackSnapshot.fk;
-          restoreSnapshot(rollbackSnapshot, msg);
-        } else {
-          sessionRef.current = null;
-          engineRef.current = null;
-          ikRef.current = null;
-          ikSolverRef.current = null;
-          fkRef.current = null;
-          setLoadError(msg);
+          const msg = e instanceof Error ? e.message : String(e);
+          if (rollbackSnapshot && !isRollbackReload) {
+            try {
+              await loadRobot(
+                rollbackSnapshot.urdfText,
+                rollbackSnapshot.urdfFileName,
+                meshesRef.current,
+                rollbackSnapshot.baseLink,
+                'manual',
+                true,
+              );
+              useSessionStore.setState({
+                simStatus: 'ready',
+                simMessage: `添加负载后重载失败，已恢复上一模型：${msg.split('\n')[0] ?? msg}`,
+                loading: false,
+                loadingMessage: '',
+              });
+              return;
+            } catch {
+              // fall through to metadata-only restore
+            }
+          }
+          if (rollbackSnapshot) {
+            sessionRef.current = rollbackSnapshot.session;
+            engineRef.current = rollbackSnapshot.engine;
+            ikRef.current = rollbackSnapshot.ik;
+            ikSolverRef.current = rollbackSnapshot.ikSolver;
+            fkRef.current = rollbackSnapshot.fk;
+            restoreSnapshot(rollbackSnapshot, msg);
+          } else {
+            sessionRef.current = null;
+            engineRef.current = null;
+            ikRef.current = null;
+            ikSolverRef.current = null;
+            fkRef.current = null;
+            setLoadError(msg);
+          }
+          throw e instanceof Error ? e : new Error(msg);
         }
-        throw e instanceof Error ? e : new Error(msg);
-      }
+      });
     },
     [
       applyRecorderWindow,
@@ -775,7 +1098,14 @@ export function useSimulation() {
 
   const loadDefaultBiped = useCallback(async () => {
     const bundle = await loadDefaultBipedUpperBody();
-    await loadRobot(bundle.urdfText, bundle.urdfFileName, bundle.meshes);
+    await loadRobot(bundle.urdfText, bundle.urdfFileName, bundle.meshes, undefined, 'initial');
+    void loadDefaultBipedMeshes().then((meshes) => {
+      meshesRef.current = meshes;
+      const state = useSessionStore.getState();
+      if (state.urdfFileName === bundle.urdfFileName) {
+        useSessionStore.setState({ meshAssets: new Map(meshes) });
+      }
+    });
   }, [loadRobot]);
 
   const applyBaseLink = useCallback(
@@ -830,11 +1160,18 @@ export function useSimulation() {
     const next = !pauseRef.current;
     pauseRef.current = next;
     setPaused(next);
-  }, [setPaused]);
+    if (next) {
+      const engine = engineRef.current;
+      if (engine) {
+        flushChartLive(engine);
+      }
+    }
+  }, [flushChartLive, setPaused]);
 
   const stopSimulation = useCallback(() => {
     cancelRef.current = true;
     cancelRafLoop();
+    stopChartSyncLoop();
     pauseRef.current = false;
     setPaused(false);
     setInterpolationActive(false);
@@ -848,25 +1185,24 @@ export function useSimulation() {
       const positions = qposToActuatedJoints(session);
       setJointPositions(positions);
       useSessionStore.getState().setCommandedJointPositions([...positions]);
-      syncRecorder(engine);
-      const times = engine.recorder.getTimes();
-      const displayTime = times.length > 0 ? times[times.length - 1]! : engine.simTime;
-      setSimRuntime(displayTime, engine.recorder.getNumFrames());
-      setSimStatus('ready', '仿真已停止');
+      syncChartDisplayFromWall(engine);
     }
+    setSimStatus('ready', '仿真已停止');
+    cancelRef.current = false;
   }, [
     cancelRafLoop,
     setInterpolationActive,
     setJointPositions,
     setPaused,
-    setSimRuntime,
     setSimStatus,
-    syncRecorder,
+    stopChartSyncLoop,
+    syncChartDisplayFromWall,
   ]);
 
   const resetRobotPose = useCallback(() => {
     cancelRef.current = true;
     cancelRafLoop();
+    stopChartSyncLoop();
     pauseRef.current = false;
     setPaused(false);
     setInterpolationActive(false);
@@ -902,6 +1238,7 @@ export function useSimulation() {
     setInterpolationActive,
     setPaused,
     setSimStatus,
+    stopChartSyncLoop,
     syncRecorder,
   ]);
 
@@ -912,9 +1249,11 @@ export function useSimulation() {
     engine.simTime = 0;
     useSessionStore.getState().setRecorderPaused(false);
     engine.recordingEnabled = true;
+    resetChartWallRecorder();
+    clearChartLiveBuffer();
     syncRecorder(engine);
     setSimStatus('ready', '曲线数据已清空');
-  }, [setSimStatus, syncRecorder]);
+  }, [resetChartWallRecorder, setSimStatus, syncRecorder]);
 
   const toggleRecorderPause = useCallback(() => {
     const engine = engineRef.current;
@@ -931,10 +1270,10 @@ export function useSimulation() {
       const engine = engineRef.current;
       if (engine) {
         applyRecorderWindow(engine);
-        syncRecorder(engine);
+        syncChartDisplayFromWall(engine);
       }
     },
-    [applyRecorderWindow, syncRecorder],
+    [applyRecorderWindow, syncChartDisplayFromWall],
   );
 
   const setJointGains = useCallback((index: number, kp: number, kd: number) => {
@@ -983,15 +1322,9 @@ export function useSimulation() {
       const qStartJoints = opts.qStartJoints ?? [...state.commandedJointPositions];
       const maxVel = state.jointMaxVelocity;
 
-      cancelRef.current = true;
-      cancelRafLoop();
-      engine.controlDt = state.controlDt;
-      applyRecorderWindow(engine);
-      syncExternalWrenches(engine);
-      cancelRef.current = false;
-      pauseRef.current = false;
-      setPaused(false);
+      prepareInterpolationRun(engine);
       setInterpolationActive(true);
+      ensureChartSyncLoop();
 
       const statusMessage =
         opts.statusMessage ?? `关节插值 (限速 ${maxVel.toFixed(2)} rad/s)…`;
@@ -1000,15 +1333,17 @@ export function useSimulation() {
       const qStart = actuatedJointsToQpos(session, qStartJoints);
       const qEnd = actuatedJointsToQpos(session, targetJoints);
 
-      const ok = await engine.runVelocityLimitedInterpolationAsync(qStart, qEnd, maxVel, {
-        cancelCheck: () => cancelRef.current,
-        pauseCheck: () => pauseRef.current,
-        yieldEvery: 20,
-        onYield: () => new Promise((r) => requestAnimationFrame(() => r())),
-        stepCallback: makeStepCallback(engine, { value: 0 }),
-      });
+      let ok = false;
+      try {
+        ok = await engine.runVelocityLimitedInterpolationAsync(qStart, qEnd, maxVel, {
+          cancelCheck: () => cancelRef.current,
+          pauseCheck: () => pauseRef.current,
+          stepCallback: makeStepCallback(engine, { value: 0 }),
+        });
+      } finally {
+        setInterpolationActive(false);
+      }
 
-      setInterpolationActive(false);
       useSessionStore.getState().setJointTargets([...targetJoints]);
       useSessionStore.getState().setCommandedJointPositions([...targetJoints]);
       setJointPositions(qposToActuatedJoints(session));
@@ -1019,11 +1354,7 @@ export function useSimulation() {
       setPaused(false);
 
       if (ok) {
-        if (!loopActiveRef.current) {
-          runHoldLoop('插值完成，保持目标');
-        } else {
-          setSimStatus('running', '插值完成，保持目标');
-        }
+        runHoldLoop('插值完成，保持目标');
       } else {
         setSimStatus('error', '关节插值未完成');
       }
@@ -1031,9 +1362,9 @@ export function useSimulation() {
       return ok;
     },
     [
-      applyRecorderWindow,
-      cancelRafLoop,
+      ensureChartSyncLoop,
       makeStepCallback,
+      prepareInterpolationRun,
       runHoldLoop,
       setEeFkPos,
       setInterpolationActive,
@@ -1041,16 +1372,18 @@ export function useSimulation() {
       setPaused,
       setSimStatus,
       syncRecorder,
-      syncExternalWrenches,
     ],
   );
 
   const sendTargetInterpolation = useCallback(
     async (targetJoints: number[], opts?: { qStartJoints?: number[] }) => {
-      ensureSimRunning();
+      if (!engineRef.current || !sessionRef.current) {
+        setSimStatus('error', '模型未就绪，请等待加载完成');
+        return;
+      }
       await runJointInterpolationTo(targetJoints, opts);
     },
-    [ensureSimRunning, runJointInterpolationTo],
+    [runJointInterpolationTo, setSimStatus],
   );
 
   const computeEePoseFromJoints = useCallback(
@@ -1178,15 +1511,9 @@ export function useSimulation() {
       const maxVel = state.jointMaxVelocity;
       const profile = state.interpProfile;
 
-      cancelRef.current = true;
-      cancelRafLoop();
-      engine.controlDt = state.controlDt;
-      applyRecorderWindow(engine);
-      syncExternalWrenches(engine);
-      cancelRef.current = false;
-      pauseRef.current = false;
-      setPaused(false);
+      prepareInterpolationRun(engine);
       setInterpolationActive(true);
+      ensureChartSyncLoop();
 
       const qWaypoints = [
         actuatedJointsToQpos(session, qStartJoints),
@@ -1200,20 +1527,27 @@ export function useSimulation() {
         `多路点插值 (${profileLabel}, ${targets.length} 帧, 限速 ${maxVel.toFixed(2)} rad/s)…`,
       );
 
-      const ok = await engine.runMultiWaypointInterpolationAsync(
-        qWaypoints,
-        maxVel,
-        effectiveProfile,
-        {
-        cancelCheck: () => cancelRef.current,
-        pauseCheck: () => pauseRef.current,
-        yieldEvery: 20,
-        onYield: () => new Promise((r) => requestAnimationFrame(() => r())),
-        stepCallback: makeStepCallback(engine, { value: 0 }),
-      });
+      let ok = false;
+      try {
+        ok = await engine.runMultiWaypointInterpolationAsync(
+          qWaypoints,
+          maxVel,
+          effectiveProfile,
+          {
+            cancelCheck: () => cancelRef.current,
+            pauseCheck: () => pauseRef.current,
+            stepCallback: makeStepCallback(engine, { value: 0 }),
+          },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setSimStatus('error', `多路点插值失败: ${msg.split('\n')[0] ?? msg}`);
+        return false;
+      } finally {
+        setInterpolationActive(false);
+      }
 
       const finalJoints = targets[targets.length - 1]!.jointPositions;
-      setInterpolationActive(false);
       useSessionStore.getState().setJointTargets([...finalJoints]);
       useSessionStore.getState().setCommandedJointPositions([...finalJoints]);
       setJointPositions(qposToActuatedJoints(session));
@@ -1225,11 +1559,7 @@ export function useSimulation() {
       setPaused(false);
 
       if (ok) {
-        if (!loopActiveRef.current) {
-          runHoldLoop('多路点插值完成，保持目标');
-        } else {
-          setSimStatus('running', '多路点插值完成，保持目标');
-        }
+        runHoldLoop('多路点插值完成，保持目标');
       } else {
         setSimStatus('error', '多路点插值未完成');
       }
@@ -1237,9 +1567,9 @@ export function useSimulation() {
       return ok;
     },
     [
-      applyRecorderWindow,
-      cancelRafLoop,
+      ensureChartSyncLoop,
       makeStepCallback,
+      prepareInterpolationRun,
       runHoldLoop,
       setEeFkPos,
       setInterpolationActive,
@@ -1247,7 +1577,6 @@ export function useSimulation() {
       setPaused,
       setSimStatus,
       syncRecorder,
-      syncExternalWrenches,
     ],
   );
 
@@ -1352,6 +1681,10 @@ export function useSimulation() {
 
   const executeMotionTargets = useCallback(async () => {
     const state = useSessionStore.getState();
+    if (!engineRef.current || !sessionRef.current) {
+      setSimStatus('error', '模型未就绪，请等待加载完成');
+      return;
+    }
     if (state.motionTargets.length === 0) {
       if (state.controlLayer === 'joint') {
         await runJointTarget();
@@ -1360,9 +1693,8 @@ export function useSimulation() {
       }
       return;
     }
-    ensureSimRunning();
     await runMultiWaypointInterpolation(state.motionTargets);
-  }, [ensureSimRunning, runEeTarget, runJointTarget, runMultiWaypointInterpolation]);
+  }, [runEeTarget, runJointTarget, runMultiWaypointInterpolation, setSimStatus]);
 
   const runTrajectorySim = useCallback(async () => {
     const engine = engineRef.current;
@@ -1380,6 +1712,7 @@ export function useSimulation() {
     applyRecorderWindow(engine);
     syncExternalWrenches(engine);
     setSimStatus('running', '运行轨迹仿真…');
+    ensureChartSyncLoop();
 
     const traj = new Trajectory();
     for (const wp of trajectoryWaypoints) {
@@ -1400,6 +1733,7 @@ export function useSimulation() {
         });
         setJointPositions(qposToActuatedJoints(session));
         syncRecorder(engine);
+        stopChartSyncLoop();
         setSimStatus(success ? 'ready' : 'error', success ? '轨迹仿真完成' : '轨迹仿真失败');
         resolve();
       });
@@ -1407,9 +1741,11 @@ export function useSimulation() {
   }, [
     applyRecorderWindow,
     cancelRafLoop,
+    ensureChartSyncLoop,
     makeStepCallback,
     setJointPositions,
     setSimStatus,
+    stopChartSyncLoop,
     syncRecorder,
     syncExternalWrenches,
     trajectoryWaypoints,
@@ -1428,6 +1764,42 @@ export function useSimulation() {
     downloadBlob(csvToBlob(csv), `${name}_simulation.csv`);
     setSimStatus('ready', 'CSV 已导出');
   }, [robotInfo, setSimStatus]);
+
+  const exportMotionTargetsCsv = useCallback(() => {
+    const state = useSessionStore.getState();
+    if (!state.robotInfo) {
+      setSimStatus('error', '请先加载模型');
+      return;
+    }
+    const base = state.urdfFileName?.replace(/\.urdf$/i, '') ?? state.robotInfo.name;
+    downloadMotionTargetsCsv(
+      state.motionTargets,
+      state.robotInfo.jointNames,
+      `${base}_motion_targets.csv`,
+    );
+    setSimStatus('ready', `已导出 ${state.motionTargets.length} 个运动目标`);
+  }, [setSimStatus]);
+
+  const importMotionTargetsCsv = useCallback(
+    async (file: File) => {
+      const state = useSessionStore.getState();
+      if (!state.robotInfo) {
+        setSimStatus('error', '请先加载模型');
+        return;
+      }
+      try {
+        const text = await file.text();
+        const { targets, warnings } = parseMotionTargetsCsv(text, state.robotInfo.jointNames);
+        useSessionStore.getState().setMotionTargets(targets);
+        const warnHint =
+          warnings.length > 0 ? `（${warnings.slice(0, 2).join('；')}）` : '';
+        setSimStatus('ready', `已导入 ${targets.length} 个运动目标${warnHint}`);
+      } catch (e) {
+        setSimStatus('error', e instanceof Error ? e.message : String(e));
+      }
+    },
+    [setSimStatus],
+  );
 
   const dispose = useCallback(() => {
     cancelRafLoop();
@@ -1536,7 +1908,7 @@ export function useSimulation() {
   const reloadUrdf = useCallback(
     async (urdfText: string) => {
       const name = useSessionStore.getState().urdfFileName ?? 'robot.urdf';
-      await loadRobot(urdfText, name, meshesRef.current);
+      await loadRobot(urdfText, name, meshesRef.current, undefined, 'payload-reload');
     },
     [loadRobot],
   );
@@ -1556,6 +1928,8 @@ export function useSimulation() {
     commitEeGizmoDrag,
     runTrajectorySim,
     exportCsv,
+    exportMotionTargetsCsv,
+    importMotionTargetsCsv,
     cancelSimulation,
     pauseSimulation,
     stopSimulation,

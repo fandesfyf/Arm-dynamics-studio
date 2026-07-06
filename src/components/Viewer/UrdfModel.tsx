@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import URDFLoader from 'urdf-loader';
 import type { URDFRobot } from 'urdf-loader';
-import { SPHERE_PAYLOAD_LINK_PATTERN } from '../../core/payload-editor';
+import {
+  SPHERE_PAYLOAD_LINK_PATTERN,
+  SPHERE_PAYLOAD_VISUAL_COLOR,
+} from '../../core/payload-editor';
 import { computeGhostOpacity } from '../../stores/viz-store';
 import { createMeshUrlModifier } from '../../utils/urdf-mesh-resolver';
 import { registerMainUrdfRobot } from '../../utils/viewer-robot-registry';
@@ -94,9 +97,9 @@ export function UrdfModel({
           const m = mesh as THREE.Mesh;
           if (m.isMesh) {
             m.material = new THREE.MeshStandardMaterial({
-              color: '#f28c1a',
+              color: SPHERE_PAYLOAD_VISUAL_COLOR,
               transparent: true,
-              opacity: 0.85,
+              opacity: 0.9,
             });
           }
         });

@@ -72,8 +72,30 @@ describe('urdf-base-fixture', () => {
     expect(candidates[0]).toBe('zarm_l7_end_effector');
     expect(candidates).toContain('zarm_r7_end_effector');
     expect(candidates.indexOf('zarm_l7_end_effector')).toBeLessThan(
-      candidates.indexOf('zarm_l1_link'),
+      candidates.indexOf('base_link'),
     );
+  });
+
+  it('lists all links for generic robots with custom names', () => {
+    const urdf = `<?xml version="1.0"?>
+<robot name="custom_arm">
+  <link name="base_link"/>
+  <link name="shoulder"/>
+  <link name="my_custom_tip"/>
+  <joint name="j1" type="revolute">
+    <parent link="base_link"/><child link="shoulder"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1" effort="1" velocity="1"/>
+  </joint>
+  <joint name="j2" type="revolute">
+    <parent link="shoulder"/><child link="my_custom_tip"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1" effort="1" velocity="1"/>
+  </joint>
+</robot>`;
+    const candidates = listEndEffectorLinkCandidates(urdf);
+    expect(candidates).toEqual(['my_custom_tip', 'shoulder', 'base_link']);
+    expect(detectEndEffectorLink(urdf)).toBe('my_custom_tip');
   });
 
   it('resolves end effector link to parent revolute joint', () => {

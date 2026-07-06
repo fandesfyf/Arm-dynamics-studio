@@ -77,20 +77,19 @@ interface ParsedUrdfJoint {
   };
 }
 
-function extractActuatedJointNamesFromUrdf(urdfText: string): {
-  jointNames: string[];
-  lowerLimits: number[];
-  upperLimits: number[];
-  neutralConfiguration: number[];
-} {
+/** 从 URDF 文本构建 Pinocchio Model */
+export async function loadPinocchioFromUrdf(
+  urdfText: string,
+): Promise<PinocchioLoadResult> {
+  const pin = await getPinocchioModule();
   const urdfData = parseURDF(urdfText);
-  const joints = urdfData.joints as ParsedUrdfJoint[];
+  const model = buildPinocchioModel(pin, urdfData);
 
   const jointNames: string[] = [];
   const lowerLimits: number[] = [];
   const upperLimits: number[] = [];
   const neutralConfiguration: number[] = [];
-
+  const joints = urdfData.joints as ParsedUrdfJoint[];
   for (const joint of joints) {
     if (!MOVING_JOINT_TYPES.has(joint.type)) continue;
     jointNames.push(joint.name);
@@ -101,26 +100,13 @@ function extractActuatedJointNamesFromUrdf(urdfText: string): {
     neutralConfiguration.push((lo + hi) / 2);
   }
 
-  return { jointNames, lowerLimits, upperLimits, neutralConfiguration };
-}
-
-/** 从 URDF 文本构建 Pinocchio Model */
-export async function loadPinocchioFromUrdf(
-  urdfText: string,
-): Promise<PinocchioLoadResult> {
-  const pin = await getPinocchioModule();
-  const urdfData = parseURDF(urdfText);
-  const model = buildPinocchioModel(pin, urdfData);
-
-  const meta = extractActuatedJointNamesFromUrdf(urdfText);
-
   return {
     pin,
     model,
-    jointNames: meta.jointNames,
-    lowerLimits: meta.lowerLimits,
-    upperLimits: meta.upperLimits,
-    neutralConfiguration: meta.neutralConfiguration,
+    jointNames,
+    lowerLimits,
+    upperLimits,
+    neutralConfiguration,
     nq: model.nq as number,
     nv: model.nv as number,
   };

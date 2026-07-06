@@ -111,4 +111,31 @@ describe('DataRecorder', () => {
     }
     expect(rec.getNumFrames()).toBe(50);
   });
+
+  it('toDictForDisplay decimates large series but keeps endpoints', () => {
+    const rec = new DataRecorder();
+    rec.setMaxDurationSec(0);
+    for (let i = 0; i < 5000; i++) {
+      rec.record(makeRecord(i * 0.002));
+    }
+    expect(rec.getNumFrames()).toBe(5000);
+    const d = rec.toDictForDisplay(200);
+    expect(d.time.length).toBeLessThanOrEqual(201);
+    expect(d.time[0]).toBeCloseTo(0, 6);
+    expect(d.time[d.time.length - 1]).toBeCloseTo(4999 * 0.002, 4);
+    expect(d.qpos).toHaveLength(d.time.length);
+  });
+
+  it('ring buffer advances lastTime after window is full', () => {
+    const rec = new DataRecorder();
+    rec.setMaxDurationSec(0.02);
+    for (let i = 0; i < 100; i++) {
+      rec.record(makeRecord(i * 0.002));
+    }
+    const tEnd = rec.getLastTime();
+    const n = rec.getNumFrames();
+    expect(n).toBeLessThan(100);
+    expect(tEnd).toBeCloseTo(99 * 0.002, 6);
+    expect(rec.getDuration()).toBeLessThanOrEqual(0.02 + 1e-9);
+  });
 });

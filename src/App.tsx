@@ -12,6 +12,7 @@ import { SimulationPanel } from './components/panels/SimulationPanel';
 import { StatusBadge } from './components/ui/StatusBadge';
 import { AppMenuBar } from './components/layout/AppMenuBar';
 import { DockSidebar, DockBottom } from './components/layout/DockSidebar';
+import { prefetchDefaultBipedUpperBody } from './utils/biped-default-loader';
 
 function simStatusLabel(status: string): string {
   switch (status) {
@@ -32,7 +33,6 @@ function simStatusLabel(status: string): string {
 
 export default function App() {
   const robotInfo = useSessionStore((s) => s.robotInfo);
-  const recorderDict = useSessionStore((s) => s.recorderDict);
   const recorderWindowSec = useSessionStore((s) => s.recorderWindowSec);
   const urdfText = useSessionStore((s) => s.urdfText);
   const simStatus = useSessionStore((s) => s.simStatus);
@@ -72,6 +72,8 @@ export default function App() {
     resetReferencePose,
     resetGizmoToCurrent,
     syncExternalWrenchesFromStore,
+    exportMotionTargetsCsv,
+    importMotionTargetsCsv,
     dispose,
   } = sim;
 
@@ -94,19 +96,38 @@ export default function App() {
       }
 
       const state = useSessionStore.getState();
-      if (state.simStatus !== 'running') return;
+      const transportDisabled =
+        state.loading ||
+        !state.robotInfo ||
+        (state.simStatus !== 'running' && state.simStatus !== 'ready');
+      if (transportDisabled) return;
 
       e.preventDefault();
-      pauseSimulation();
+      if (state.simStatus === 'running') {
+        stopSimulation();
+      } else {
+        void startSimulation();
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [pauseSimulation]);
+  }, [startSimulation, stopSimulation]);
 
   const defaultLoadedRef = useRef(false);
   useEffect(() => {
+    void Promise.all([
+      import('./mujoco/loader').then((m) => m.getMujocoModule()),
+      import('./pinocchio/loader').then((m) => m.getPinocchioModule()),
+    ]);
+    prefetchDefaultBipedUpperBody();
+  }, []);
+
+  useEffect(() => {
     if (defaultLoadedRef.current) return;
+    if (import.meta.env.DEV && new URLSearchParams(window.location.search).get('noAutoLoad') === '1') {
+      return;
+    }
     defaultLoadedRef.current = true;
     void loadDefaultBiped().catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
@@ -114,12 +135,16 @@ export default function App() {
     });
   }, [loadDefaultBiped]);
 
-  const panelDisabled = loading || simStatus === 'running';
+  const payloadMutateDisabled = loading || simStatus === 'running';
+  const payloadFormDisabled = loading;
+  const wrenchEditingDisabled = loading;
   const controlPanelDisabled = loading;
 
   const running = simStatus === 'running';
   const primaryIsStop = running;
   const transportDisabled = loading || !robotInfo || (!running && simStatus !== 'ready');
+  const pauseDisabled = loading || !robotInfo || !running;
+  const pauseLabel = isPaused ? '▶ 继续' : '⏸ 暂停';
   const transportTitle = running
     ? '停止仿真'
     : '开始仿真';
@@ -145,32 +170,16 @@ export default function App() {
           disabled={loading}
         />
       ),
-      simulation: (
-        <SimulationPanel
-          onStart={() => void startSimulation()}
-          onPause={pauseSimulation}
-          onStop={stopSimulation}
-          onResetRecorder={resetRecorder}
-          onToggleRecorderPause={toggleRecorderPause}
-          disabled={loading || !robotInfo}
-          canStart={!!robotInfo && simStatus !== 'running'}
-        />
-      ),
+      simulation: <SimulationPanel disabled={loading || !robotInfo} />,
     }),
     [
       applyBaseLink,
       loadDefaultBiped,
       loadRobot,
       loading,
-      pauseSimulation,
       reloadUrdf,
-      resetRecorder,
       resetRobotPose,
-      toggleRecorderPause,
       robotInfo,
-      simStatus,
-      startSimulation,
-      stopSimulation,
     ],
   );
 
@@ -193,6 +202,8 @@ export default function App() {
           onControllerKdDampingChange={setControllerKdDamping}
           onResetReference={resetReferencePose}
           onResetGizmo={resetGizmoToCurrent}
+          onExportMotionTargets={exportMotionTargetsCsv}
+          onImportMotionTargets={importMotionTargetsCsv}
           disabled={controlPanelDisabled || !robotInfo}
         />
       ),
@@ -201,7 +212,9 @@ export default function App() {
           urdfText={urdfText}
           onUrdfChanged={(xml) => reloadUrdf(xml)}
           onExternalWrenchChange={syncExternalWrenchesFromStore}
-          disabled={panelDisabled}
+          payloadDisabled={payloadMutateDisabled}
+          payloadFormDisabled={payloadFormDisabled}
+          wrenchDisabled={wrenchEditingDisabled}
         />
       ) : (
         <section className="panel-section">
@@ -213,7 +226,9 @@ export default function App() {
     [
       applyEndEffectorLink,
       controlPanelDisabled,
-      panelDisabled,
+      payloadMutateDisabled,
+      payloadFormDisabled,
+      wrenchEditingDisabled,
       reloadUrdf,
       resetReferencePose,
       resetGizmoToCurrent,
@@ -224,6 +239,8 @@ export default function App() {
       applyAutoJointGains,
       setControllerKdDamping,
       syncExternalWrenchesFromStore,
+      exportMotionTargetsCsv,
+      importMotionTargetsCsv,
       urdfText,
     ],
   );
@@ -245,20 +262,6 @@ export default function App() {
           </div>
         )}
         <div className="app-studio-status">
-          {robotInfo && (
-            <button
-              type="button"
-              className={`header-transport-btn${primaryIsStop ? ' header-transport-btn--stop' : ''}${
-                transportDisabled ? ' header-transport-btn--disabled' : ''
-              }`}
-              disabled={transportDisabled}
-              onClick={handleTransport}
-              title={transportTitle}
-              aria-label={transportTitle}
-            >
-              {primaryIsStop ? '⏹' : '▶'}
-            </button>
-          )}
           <StatusBadge status={simStatus} label={simStatusLabel(simStatus)} />
           {running && <span className="header-sim-time">t = {simTime.toFixed(3)} s</span>}
           {recorder.sampleCount > 0 && (
@@ -294,7 +297,20 @@ export default function App() {
       </header>
 
       <div className="app-studio-body">
-        <DockSidebar side="left" panels={leftPanels} />
+        <DockSidebar
+          side="left"
+          panels={leftPanels}
+          transport={{
+            running: primaryIsStop,
+            disabled: transportDisabled,
+            title: transportTitle,
+            onTransport: handleTransport,
+            onPause: pauseSimulation,
+            pauseDisabled,
+            pauseLabel,
+            isPaused,
+          }}
+        />
         <main className="app-studio-viewer">
           <RobotViewer />
         </main>
@@ -303,11 +319,13 @@ export default function App() {
 
       <DockBottom panelId="charts" title="曲线">
         <ChartPanel
-          recorderDict={recorderDict}
           jointNames={robotInfo?.jointNames}
           windowSeconds={recorderWindowSec}
           recorderWindowSec={recorderWindowSec}
           onRecorderWindowChange={setRecorderWindowSec}
+          onToggleRecorderPause={toggleRecorderPause}
+          onResetRecorder={resetRecorder}
+          recorderControlsDisabled={loading}
           filenameBase={robotInfo?.name}
           title=""
         />

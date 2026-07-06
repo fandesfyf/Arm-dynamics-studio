@@ -9,4 +9,4 @@ tsconfig.tsbuildinfo
 .DS_Store
 *.swp
 .idea/
-.vscode/
+debug-dumps/

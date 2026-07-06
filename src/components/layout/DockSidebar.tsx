@@ -3,14 +3,26 @@ import { PANEL_REGISTRY, type DockSide, useUiStore } from '../../stores/ui-store
 import { DockPanel } from './DockPanel';
 import { DockResizeHandle } from './DockResizeHandle';
 
+export interface DockSidebarTransportProps {
+  running: boolean;
+  disabled: boolean;
+  title: string;
+  onTransport: () => void;
+  pauseDisabled?: boolean;
+  pauseLabel?: string;
+  isPaused?: boolean;
+  onPause?: () => void;
+}
+
 interface DockSidebarProps {
   side: DockSide;
   panels: Record<string, ReactNode>;
+  transport?: DockSidebarTransportProps;
 }
 
-export function DockSidebar({ side, panels }: DockSidebarProps) {
-  const panelState = useUiStore((s) => s.panels);
-  const setPanelOpen = useUiStore((s) => s.setPanelOpen);
+export function DockSidebar({ side, panels, transport }: DockSidebarProps) {
+  const expandedId = useUiStore((s) => s.getExpandedOnSide(side as 'left' | 'right'));
+  const togglePanel = useUiStore((s) => s.togglePanel);
   const width = useUiStore((s) => (side === 'left' ? s.leftWidth : s.rightWidth));
   const setLeftWidth = useUiStore((s) => s.setLeftWidth);
   const setRightWidth = useUiStore((s) => s.setRightWidth);
@@ -38,20 +50,50 @@ export function DockSidebar({ side, panels }: DockSidebarProps) {
     persistDimensions();
   }, [persistDimensions]);
 
-  const defs = PANEL_REGISTRY.filter((p) => p.side === side && panelState[p.id]?.open)
-    .sort((a, b) => a.order - b.order);
+  if (side === 'bottom') return null;
 
-  if (defs.length === 0) return null;
+  const defs = PANEL_REGISTRY.filter((p) => p.side === side).sort((a, b) => a.order - b.order);
 
   return (
     <aside className={`dock-sidebar dock-sidebar--${side}`} style={{ width }}>
-      <div className="dock-sidebar-scroll">
+      {side === 'left' && transport && (
+        <div className="dock-sidebar-transport">
+          <button
+            type="button"
+            className={`header-transport-btn dock-transport-btn${
+              transport.running ? ' header-transport-btn--stop' : ''
+            }${transport.disabled ? ' header-transport-btn--disabled' : ''}`}
+            disabled={transport.disabled}
+            onClick={transport.onTransport}
+            title={transport.title}
+            aria-label={transport.title}
+          >
+            {transport.running ? '⏹ 停止仿真' : '▶ 开始仿真'}
+          </button>
+          {transport.onPause && transport.running && (
+            <button
+              type="button"
+              className={`header-transport-btn dock-pause-btn${
+                transport.pauseDisabled ? ' header-transport-btn--disabled' : ''
+              }${transport.isPaused ? ' dock-pause-btn--paused' : ''}`}
+              disabled={transport.pauseDisabled}
+              onClick={transport.onPause}
+              title={transport.pauseLabel}
+              aria-label={transport.pauseLabel}
+            >
+              {transport.pauseLabel}
+            </button>
+          )}
+        </div>
+      )}
+      <div className="dock-sidebar-stack">
         {defs.map((def) => (
           <DockPanel
             key={def.id}
             id={def.id}
             title={def.title}
-            onClose={() => setPanelOpen(def.id, false)}
+            expanded={expandedId === def.id}
+            onActivate={() => togglePanel(def.id)}
           >
             {panels[def.id]}
           </DockPanel>
@@ -81,6 +123,7 @@ export function DockBottom({ panelId, title, children }: DockBottomProps) {
   const setBottomHeight = useUiStore((s) => s.setBottomHeight);
   const persistDimensions = useUiStore((s) => s.persistDimensions);
   const collapsed = useUiStore((s) => s.isPanelCollapsed(panelId));
+  const toggleCollapsed = useUiStore((s) => s.togglePanelCollapsed);
 
   const isDraggingRef = useRef(false);
   const startHeightRef = useRef(height);
@@ -115,7 +158,13 @@ export function DockBottom({ panelId, title, children }: DockBottomProps) {
           onDragEnd={handleDragEnd}
         />
       )}
-      <DockPanel id={panelId} title={title} onClose={() => setPanelOpen(panelId, false)}>
+      <DockPanel
+        id={panelId}
+        title={title}
+        expanded={!collapsed}
+        onActivate={() => toggleCollapsed(panelId)}
+        onClose={() => setPanelOpen(panelId, false)}
+      >
         {children}
       </DockPanel>
     </footer>

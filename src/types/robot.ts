@@ -12,6 +12,10 @@ export interface RobotAssetBundle {
   urdfText: string;
   urdfFileName: string;
   meshes: Map<string, Uint8Array>;
+  /** dev 调试：区分初次加载与负载重载 */
+  loadPhase?: 'initial' | 'payload-reload' | 'manual';
+  /** 已由 prepareUrdfForMujocoLoad 处理，跳过 loader 内二次清洗与校验 */
+  urdfPrepared?: boolean;
 }
 
 export interface MujocoLoadResult {
@@ -56,4 +60,6 @@ export interface RobotLoadInput {
   meshes?: Map<string, Uint8Array>;
   endEffectorLink?: string;
   baseLink?: string;
+  loadPhase?: 'initial' | 'payload-reload' | 'manual';
+  urdfPrepared?: boolean;
 }

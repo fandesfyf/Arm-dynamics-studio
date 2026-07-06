@@ -4,9 +4,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { angleDiff, ComputedTorqueController } from './controller';
+import { angleDiff, ComputedTorqueController, gainsFromMassDiagonal } from './controller';
 import { ConstantJointPlanner } from './planner';
-import { CONTROL_DT } from './simulation';
+import { CONTROL_DT, createSimulation } from './simulation';
 import { loadMujocoRobot } from '../mujoco/loader';
 import { vecGet } from '../types/mujoco';
 import { SimulationEngine } from './simulation';
@@ -25,7 +25,7 @@ describe('T2 controller + simulation', () => {
     expect(Math.abs(d[0])).toBeLessThan(Math.PI / 2);
   });
 
-  it('ComputedTorqueController initializes Kp/Kd from mj_fullM', async () => {
+  it('ComputedTorqueController massMatrixDiagonal yields valid Kp/Kd', async () => {
     const bundle = await loadMujocoRobot({
       urdfText: urdfXml,
       urdfFileName: 'test_arm.urdf',
@@ -40,11 +40,14 @@ describe('T2 controller + simulation', () => {
       vecGet(bundle.data.qpos, bundle.nq),
       bundle.nq,
     );
-    expect(ctrl.kp.length).toBe(bundle.nv);
-    expect(ctrl.kd.length).toBe(bundle.nv);
+    const gains = gainsFromMassDiagonal(
+      ctrl.massMatrixDiagonal(vecGet(bundle.data.qpos, bundle.nq)),
+    );
+    expect(gains.kp.length).toBe(bundle.nv);
+    expect(gains.kd.length).toBe(bundle.nv);
     for (let i = 0; i < bundle.nv; i++) {
-      expect(ctrl.kp[i]).toBeGreaterThanOrEqual(0.5);
-      expect(ctrl.kd[i]).toBeGreaterThan(0);
+      expect(gains.kp[i]).toBeGreaterThanOrEqual(0.5);
+      expect(gains.kd[i]).toBeGreaterThan(0);
     }
     const tau = ctrl.computeTorque(
       new Float64Array(bundle.nv),
@@ -82,6 +85,9 @@ describe('T2 controller + simulation', () => {
       vecGet(bundle.data.qpos, bundle.nq),
       bundle.nq,
     );
+    const q0 = vecGet(bundle.data.qpos, bundle.nq);
+    const gains = gainsFromMassDiagonal(ctrl.massMatrixDiagonal(q0));
+    ctrl.setGains(gains.kp, gains.kd);
     const session = {
       mujoco: bundle.mujoco,
       model: bundle.model,
@@ -98,8 +104,8 @@ describe('T2 controller + simulation', () => {
     expect(engine.controlDt).toBe(CONTROL_DT);
 
     const nq = bundle.nq;
-    const q0 = Array.from(vecGet(bundle.data.qpos, nq));
-    const qTarget = q0.slice();
+    const qInit = Array.from(vecGet(bundle.data.qpos, nq));
+    const qTarget = qInit.slice();
     qTarget[0] = (qTarget[0] ?? 0) + 0.3;
 
     const steps: number[] = [];
@@ -135,8 +141,10 @@ describe('T2 controller + simulation', () => {
       urdfXml: fixture.urdfText,
       urdfFileName: 'biped_s70_upper_body.urdf',
     });
-    const ctrl = session.createController();
-    const { kp, kd } = nvGainsToActuated(session, ctrl.kp, ctrl.kd);
+    const engine = createSimulation(session);
+    engine.recomputeAutoGains(vecGet(session.data.qpos, session.nq));
+    const gains = engine.getGains();
+    const { kp, kd } = nvGainsToActuated(session, gains.kp, gains.kd);
     expect(kp.every((v) => v >= 0.5)).toBe(true);
     expect(kd.every((v) => v > 0)).toBe(true);
     session.dispose();

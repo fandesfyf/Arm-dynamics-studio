@@ -1,26 +1,18 @@
-# URDF 单臂动力学仿真工具（Web 版）
+# Arm Dynamics Studio
 
-浏览器端单臂 URDF 动力学仿真：MuJoCo WASM 物理步进 + pinocchio-js 运动学/IK，纯静态部署。
+浏览器端 URDF 单臂动力学仿真工具。基于 MuJoCo WASM 物理步进与 pinocchio-js 运动学/IK，纯前端静态部署，无需后端服务。
 
-## 快速开始
+## 目录
 
-```bash
-npm install
-npm run dev
-```
+- [功能概览](#功能概览)
+- [技术栈](#技术栈)
+- [环境要求](#环境要求)
+- [快速开始](#快速开始)
+- [构建与测试](#构建与测试)
+- [项目结构](#项目结构)
+- [许可证](#许可证)
 
-浏览器访问 Vite 提示的本地地址（默认 `http://localhost:5173`）。首次加载会下载 MuJoCo WASM（约 10 MB），请稍候。
-
-## 构建与测试
-
-```bash
-npm run build    # 输出 dist/，可部署至任意静态托管
-npm run preview  # 本地预览生产构建
-npm test         # Vitest 单元测试
-npm run test:watch  # 监听模式
-```
-
-## 功能
+## 功能概览
 
 | 能力 | 说明 |
 |------|------|
@@ -35,19 +27,74 @@ npm run test:watch  # 监听模式
 | 实时曲线 | uPlot：指令（虚线）vs 实际（实线），q / v / τ |
 | CSV 导出 | 时序数据列格式对齐旧版 Python 桌面版 |
 
-## 状态
+## 技术栈
 
-- **Wave 2 已完成**（2026-07-01）：UI 集成、实时曲线、ZIP 上传与质量编辑。详见 [REVIEW_WAVE2.md](./docs/REVIEW_WAVE2.md)。
-- **旧版 Python 实现**：已归档至上级仓库 `_archive/legacy-python/`（日常开发不参考）。
-
-## 文档
-
-| 文件 | 说明 |
+| 组件 | 用途 |
 |------|------|
-| [WEB_IMPLEMENTATION_PLAN.md](./docs/WEB_IMPLEMENTATION_PLAN.md) | Web 版完整实施计划（架构、阶段、模块、风险） |
-| [TASK_DIVISION.md](./docs/TASK_DIVISION.md) | 任务分工与 Wave 进度 |
-| [REVIEW_WAVE1.md](./docs/REVIEW_WAVE1.md) | Wave 1 代码评审 |
-| [REVIEW_WAVE2.md](./docs/REVIEW_WAVE2.md) | Wave 2 集成评审与验收清单 |
+| React + Vite | 应用框架与构建 |
+| Three.js / R3F | 三维渲染与交互 |
+| @mujoco/mujoco | WASM 物理仿真 |
+| pinocchio-js | 运动学、关节映射、DLS IK |
+| closed-chain-ik | 末端位姿 IK 求解 |
+| uPlot | 实时仿真曲线 |
+| Zustand | 全局状态管理 |
+
+## 环境要求
+
+- Node.js 18+（推荐 20+）
+- 支持 WebGL 的现代浏览器
+- 首次加载需下载 MuJoCo WASM（约 10 MB）
+
+## 快速开始
+
+```bash
+npm install
+npm run dev
+```
+
+浏览器访问终端提示的本地地址（默认 `http://localhost:5173`）。
+
+## 构建与测试
+
+```bash
+npm run build       # 输出 dist/，可部署至静态托管
+npm run preview     # 本地预览生产构建
+npm test            # Vitest 单元测试
+npm run test:watch  # 监听模式
+```
+
+## 项目结构
+
+```
+.
+├── docs/                    # 设计与评审文档
+├── public/
+│   └── robots/              # 内置 URDF 模型
+├── scripts/                 # 构建辅助脚本
+├── src/
+│   ├── components/
+│   │   ├── Viewer/          # 三维视口、URDF 模型、运动目标标记
+│   │   ├── charts/          # uPlot 实时曲线与导出
+│   │   ├── layout/          # 菜单栏、侧边栏、可停靠面板
+│   │   ├── panels/          # 模型、仿真、控制、IK、轨迹等功能面板
+│   │   └── ui/              # 通用 UI 组件与浮动面板
+│   ├── contexts/            # React 上下文（如末端 IK）
+│   ├── core/                # 仿真核心：控制器、轨迹、规划、载荷编辑
+│   ├── export/              # CSV 时序数据导出
+│   ├── fixtures/            # 测试用 URDF 样例
+│   ├── hooks/               # useSimulation 等仿真生命周期钩子
+│   ├── ik/                  # closed-chain-ik 桥接与末端控制
+│   ├── mujoco/              # MuJoCo 加载、步进、外力
+│   ├── pinocchio/           # pinocchio-js 封装与 IK
+│   ├── stores/              # Zustand 会话 / UI / 可视化状态
+│   ├── types/               # 共享类型定义
+│   ├── utils/               # URDF 解析、资源加载、ZIP 解压
+│   └── viewer/              # 末端运动学、Gizmo 同步
+├── index.html
+├── package.json
+├── vite.config.ts
+└── vitest.config.ts
+```
 
 ## 许可证
 

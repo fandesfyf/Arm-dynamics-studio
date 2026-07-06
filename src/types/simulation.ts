@@ -46,6 +46,8 @@ export interface RunToTargetOptions {
   pauseCheck?: () => boolean;
   yieldEvery?: number;
   onYield?: () => Promise<void>;
+  /** 每 controlDt 对应 1 墙钟秒，与实时 hold 循环一致；默认 true */
+  realtimePacing?: boolean;
 }
 
 export interface RunToEeTargetOptions extends RunToTargetOptions {

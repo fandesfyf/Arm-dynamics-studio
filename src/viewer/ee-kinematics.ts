@@ -3,8 +3,6 @@ import type { URDFRobot } from 'urdf-loader';
 import type { Vec3 } from '../core/trajectory';
 import { getUrdfLinkObject } from '../ik/ik-chain-utils';
 
-const _worldPos = new THREE.Vector3();
-
 /** URDF Z-up root → Three.js Y-up (matches UrdfModel rotation.x). */
 export const Z_UP_TO_Y_UP = -Math.PI / 2;
 

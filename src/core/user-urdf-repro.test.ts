@@ -38,7 +38,7 @@ describe('user download v2 URDF repro', () => {
       mode: 'child_link',
     });
     expect(urdfText).toContain('_payload');
-    const fixture = ensureFixedBase(finalizeUrdfForMujoco(urdfText));
+    const fixture = ensureFixedBase(urdfText);
     const session = await RobotSession.create({
       urdfXml: fixture.urdfText,
       urdfFileName: 'urdf/biped_s70_upper_body.urdf',
@@ -48,11 +48,22 @@ describe('user download v2 URDF repro', () => {
     session.dispose();
   });
 
-  it('sanitize does not corrupt line 29 inertia attrs', () => {
+  it('sanitize keeps base_link inertia attrs intact', () => {
     const sanitized = sanitizeUrdfForMujoco(USER_V2);
-    const line = sanitized.split('\n')[28]!;
-    expect(line).toMatch(/\bixx="/);
-    expect(line).toMatch(/\bizz="/);
-    expect(line).not.toMatch(/\s+"/);
+    const baseInertia = sanitized.match(
+      /<link name="base_link"[\s\S]*?<inertia\b[\s\S]*?\/>/,
+    );
+    expect(baseInertia).not.toBeNull();
+    const tag = baseInertia![0]!;
+    expect(tag).toMatch(/\bixx="/);
+    expect(tag).toMatch(/\bizz="/);
+    expect(tag).not.toMatch(/"\s+>/);
+    expect(sanitized).not.toMatch(/\s+"/);
+  });
+
+  it('sanitize tightens base_link inertia for WASM', () => {
+    const sanitized = sanitizeUrdfForMujoco(USER_V2);
+    expect(sanitized).not.toMatch(/<inertia\b[^>]*?\s+\/>/);
+    expect(sanitized).toMatch(/<link name="torso"[\s\S]*?ixx="0\.001"/);
   });
 });

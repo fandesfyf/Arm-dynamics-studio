@@ -1,36 +1,40 @@
 import type { ReactNode } from 'react';
-import { useUiStore } from '../../stores/ui-store';
 
 interface DockPanelProps {
   id: string;
   title: string;
   children: ReactNode;
+  expanded: boolean;
+  onActivate: () => void;
+  /** 底部面板可关闭；左右侧栏始终显示 */
   onClose?: () => void;
 }
 
-export function DockPanel({ id, title, children, onClose }: DockPanelProps) {
-  const collapsed = useUiStore((s) => s.isPanelCollapsed(id));
-  const toggleCollapsed = useUiStore((s) => s.togglePanelCollapsed);
-
+export function DockPanel({ id, title, children, expanded, onActivate, onClose }: DockPanelProps) {
   return (
-    <section className={`dock-panel${collapsed ? ' dock-panel--collapsed' : ''}`}>
+    <section
+      className={`dock-panel${expanded ? ' dock-panel--expanded' : ' dock-panel--collapsed'}`}
+      data-panel-id={id}
+    >
       <header className="dock-panel-header">
         <button
           type="button"
           className="dock-panel-toggle"
-          onClick={() => toggleCollapsed(id)}
-          aria-expanded={!collapsed}
+          onClick={onActivate}
+          aria-expanded={expanded}
         >
-          {collapsed ? '▸' : '▾'}
+          {expanded ? '▾' : '▸'}
         </button>
-        <h3 className="dock-panel-title">{title}</h3>
+        <button type="button" className="dock-panel-title-btn" onClick={onActivate}>
+          <h3 className="dock-panel-title">{title}</h3>
+        </button>
         {onClose && (
           <button type="button" className="dock-panel-close" onClick={onClose} aria-label="关闭面板">
             ×
           </button>
         )}
       </header>
-      {!collapsed && <div className="dock-panel-body">{children}</div>}
+      {expanded && <div className="dock-panel-body">{children}</div>}
     </section>
   );
 }

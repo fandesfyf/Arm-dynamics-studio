@@ -28,7 +28,7 @@ export interface UrdfBaseFixtureResult {
   changed: boolean;
 }
 
-function parseJointBlocks(urdfText: string): UrdfJointRef[] {
+export function parseJointBlocks(urdfText: string): UrdfJointRef[] {
   const blocks = urdfText.match(/<joint\b[\s\S]*?<\/joint>/g) ?? [];
   const joints: UrdfJointRef[] = [];
   for (const block of blocks) {
@@ -81,39 +81,44 @@ export function detectBaseLink(urdfText: string): string {
   return 'base_link';
 }
 
-/** 推断末端 link（优先 zarm_*_end_effector / ee_link） */
-export function detectEndEffectorLink(urdfText: string): string | null {
-  const candidates = listEndEffectorLinkCandidates(urdfText);
-  return candidates[0] ?? null;
+/** 运动链叶节点（不作为任何 joint 的 parent） */
+export function collectLeafLinks(urdfText: string): string[] {
+  const links = parseLinkNames(urdfText).filter((name) => name !== 'world');
+  const joints = parseJointBlocks(urdfText);
+  const parents = new Set(joints.map((j) => j.parent));
+  return links.filter((name) => !parents.has(name));
 }
 
-/** End-effector link options for UI dropdown (hands / arm tips first, left-right pairs). */
+function scoreEndEffectorLink(name: string, isLeaf: boolean): number {
+  let score = 0;
+  if (isLeaf) score += 50;
+  if (/end_effector$/i.test(name)) score += 100;
+  if (name === 'ee_link' || /^ee_/i.test(name)) score += 80;
+  if (/hand|gripper|tool|tip|wrist|palm|finger/i.test(name)) score += 60;
+  if (/link$/i.test(name) && !/base/i.test(name)) score += 10;
+  if (/base|torso|pelvis|trunk|waist|root|world/i.test(name)) score -= 40;
+  return score;
+}
+
+/** 末端 link 下拉选项：列出 URDF 中全部 link（叶节点与常见末端命名优先排序） */
 export function listEndEffectorLinkCandidates(urdfText: string): string[] {
   const links = parseLinkNames(urdfText).filter((name) => name !== 'world');
-  const candidates: string[] = [];
+  if (links.length === 0) return [];
 
-  const eeLinks = links.filter((name) => /end_effector$/i.test(name) || name === 'ee_link').sort();
-  for (const name of eeLinks) {
-    if (!candidates.includes(name)) candidates.push(name);
-  }
+  const leafSet = new Set(collectLeafLinks(urdfText));
 
-  const armTips = links.filter((name) => /^zarm_[lr]\d+_link$/i.test(name)).sort();
-  for (const name of armTips) {
-    if (!candidates.includes(name)) candidates.push(name);
-  }
+  return links
+    .map((name) => ({
+      name,
+      score: scoreEndEffectorLink(name, leafSet.has(name)),
+    }))
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    .map((item) => item.name);
+}
 
-  const handLike = links
-    .filter(
-      (name) =>
-        !candidates.includes(name) &&
-        (/hand/i.test(name) || /gripper/i.test(name) || /^ee_/i.test(name)),
-    )
-    .sort();
-  for (const name of handLike) {
-    candidates.push(name);
-  }
-
-  return candidates.length > 0 ? candidates : links;
+/** 推断默认末端 link（在 listEndEffectorLinkCandidates 排序后的首项） */
+export function detectEndEffectorLink(urdfText: string): string | null {
+  return listEndEffectorLinkCandidates(urdfText)[0] ?? null;
 }
 
 /**

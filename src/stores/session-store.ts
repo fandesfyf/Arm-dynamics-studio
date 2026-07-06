@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { RecorderDict } from '../core/data-recorder';
-import type { PayloadRecord, Wrench6 } from '../core/payload-editor';
+import type { PayloadRecord, SpherePayloadMode, Wrench6 } from '../core/payload-editor';
 import type { Quat, Vec3 } from '../core/trajectory';
 import {
   IK_WEIGHT_DEFAULTS,
@@ -26,6 +26,16 @@ export interface RobotInfo {
   eeQuat: Quat;
 }
 
+/** 负载面板表单草稿（跨重载/折叠保持 link、质量等） */
+export interface PayloadFormDraft {
+  payloadLink: string;
+  wrenchLink: string;
+  sphereMass: number;
+  sphereRadius: number;
+  sphereMode: SpherePayloadMode;
+  wrenchDraft: Record<string, number>;
+}
+
 export interface TrajectoryWaypoint {
   time: number;
   position: Vec3;
@@ -35,6 +45,29 @@ export interface TrajectoryWaypoint {
 export interface RecorderSnapshot {
   sampleCount: number;
   lastTime: number | null;
+}
+
+/** 负载重载等场景下需保留的控制/曲线状态 */
+export interface ControlUiPreserve {
+  motionTargets: MotionTarget[];
+  jointTargets: number[];
+  commandedJointPositions: number[];
+  referenceJointPositions: number[];
+  jointPositions: number[];
+  jointKp: number[];
+  jointKd: number[];
+  eeTarget: Vec3;
+  eeTargetQuat: Quat;
+  eeTargetDirty: boolean;
+  controlLayer: ControlLayer;
+  controlMode: ControlMode;
+  jointMaxVelocity: number;
+  interpProfile: InterpProfile;
+  trajectoryWaypoints: TrajectoryWaypoint[];
+  recorder: RecorderSnapshot;
+  recorderDict: RecorderDict | null;
+  simTime: number;
+  simStepCount: number;
 }
 
 interface SessionState {
@@ -97,15 +130,19 @@ interface SessionState {
   interpProfile: InterpProfile;
   externalWrenches: Map<string, Wrench6>;
   payloadRecords: PayloadRecord[];
+  payloadFormDraft: PayloadFormDraft;
 
   setLoading: (loading: boolean, message?: string) => void;
-  setRobotLoaded: (payload: {
-    robotInfo: RobotInfo;
-    jointPositions: number[];
-    urdfText: string;
-    urdfFileName: string;
-    meshAssets?: Map<string, Uint8Array>;
-  }) => void;
+  setRobotLoaded: (
+    payload: {
+      robotInfo: RobotInfo;
+      jointPositions: number[];
+      urdfText: string;
+      urdfFileName: string;
+      meshAssets?: Map<string, Uint8Array>;
+    },
+    options?: { preserve?: ControlUiPreserve },
+  ) => void;
   setLoadError: (message: string) => void;
   setJointPositions: (positions: number[]) => void;
   setCommandedJointPositions: (positions: number[]) => void;
@@ -121,12 +158,19 @@ interface SessionState {
   removeTrajectoryWaypoint: (index: number) => void;
   updateRecorder: (snapshot: RecorderSnapshot, dict?: RecorderDict | null) => void;
   /** Batched UI sync during simulation — one store update per tick. */
+  syncSimUiFrame: (
+    jointPositions: number[],
+    simTime: number,
+    simStepCount: number,
+    recorder: RecorderSnapshot,
+  ) => void;
+  /** @deprecated use syncSimUiFrame + updateRecorder */
   syncSimFrame: (
     jointPositions: number[],
     simTime: number,
     simStepCount: number,
     recorder: RecorderSnapshot,
-    recorderDict: RecorderDict,
+    recorderDict?: RecorderDict,
   ) => void;
   setEndEffectorLink: (link: string) => void;
   setEeFkPos: (pos: Vec3 | null) => void;
@@ -156,16 +200,27 @@ interface SessionState {
   addMotionTarget: (target: MotionTarget) => void;
   removeMotionTarget: (id: string) => void;
   clearMotionTargets: () => void;
+  setMotionTargets: (targets: MotionTarget[]) => void;
   setInterpProfile: (profile: InterpProfile) => void;
   setExternalWrench: (link: string, wrench: Wrench6) => void;
   clearExternalWrenches: () => void;
   addPayloadRecord: (record: PayloadRecord) => void;
   removePayloadRecord: (id: string) => void;
   clearPayloadRecords: () => void;
+  setPayloadFormDraft: (patch: Partial<PayloadFormDraft>) => void;
   reset: () => void;
 }
 
 const initialRecorder: RecorderSnapshot = { sampleCount: 0, lastTime: null };
+
+const initialPayloadFormDraft: PayloadFormDraft = {
+  payloadLink: '',
+  wrenchLink: '',
+  sphereMass: 0.2,
+  sphereRadius: 0.03,
+  sphereMode: 'child_link',
+  wrenchDraft: { fx: 0, fy: 0, fz: 0, tx: 0, ty: 0, tz: 0 },
+};
 
 const initialState = {
   robotInfo: null as RobotInfo | null,
@@ -210,12 +265,13 @@ const initialState = {
   recorderPaused: false,
   controlLayer: 'joint' as ControlLayer,
   controlMode: 'interpolate' as ControlMode,
-  jointMaxVelocity: 0.3,
+  jointMaxVelocity: 0.6,
   controllerKdDamping: CONTROLLER_KD_DAMPING,
   motionTargets: [] as MotionTarget[],
   interpProfile: 'cubic' as InterpProfile,
   externalWrenches: new Map<string, Wrench6>(),
   payloadRecords: [] as PayloadRecord[],
+  payloadFormDraft: { ...initialPayloadFormDraft, wrenchDraft: { ...initialPayloadFormDraft.wrenchDraft } },
 };
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -224,30 +280,62 @@ export const useSessionStore = create<SessionState>((set) => ({
   setLoading: (loading, message = '') =>
     set({ loading, loadingMessage: message, simStatus: loading ? 'loading' : 'idle' }),
 
-  setRobotLoaded: ({ robotInfo, jointPositions, urdfText, urdfFileName, meshAssets }) =>
-    set({
-      robotInfo,
-      jointPositions,
-      commandedJointPositions: [...jointPositions],
-      jointTargets: [...jointPositions],
-      referenceJointPositions: [...jointPositions],
-      urdfText,
-      urdfFileName,
-      meshAssets: meshAssets ? new Map(meshAssets) : new Map(),
+  setRobotLoaded: (payload, options) => {
+    const base = {
+      robotInfo: payload.robotInfo,
+      urdfText: payload.urdfText,
+      urdfFileName: payload.urdfFileName,
+      meshAssets: payload.meshAssets ? new Map(payload.meshAssets) : new Map(),
       loading: false,
       loadingMessage: '',
-      simStatus: 'ready',
-      simMessage: '模型已加载',
-      eeTarget: [...robotInfo.eePos] as Vec3,
+      simStatus: 'ready' as SimStatus,
+      simMessage: options?.preserve ? '模型已重载（保留控制与曲线）' : '模型已加载',
       ikLiveError: null,
-      ikLiveStatus: 'idle',
+      ikLiveStatus: 'idle' as IkLiveStatus,
       ikLiveMessage: null,
       ikLastSolveMs: null,
+    };
+    const p = options?.preserve;
+    if (p) {
+      set({
+        ...base,
+        jointPositions: [...p.jointPositions],
+        commandedJointPositions: [...p.commandedJointPositions],
+        jointTargets: [...p.jointTargets],
+        referenceJointPositions: [...p.referenceJointPositions],
+        jointKp: [...p.jointKp],
+        jointKd: [...p.jointKd],
+        eeTarget: [...p.eeTarget] as Vec3,
+        eeTargetQuat: [...p.eeTargetQuat] as Quat,
+        eeTargetDirty: p.eeTargetDirty,
+        controlLayer: p.controlLayer,
+        controlMode: p.controlMode,
+        jointMaxVelocity: p.jointMaxVelocity,
+        interpProfile: p.interpProfile,
+        motionTargets: p.motionTargets.map((t) => ({ ...t, jointPositions: [...t.jointPositions] })),
+        trajectoryWaypoints: p.trajectoryWaypoints.map((w) => ({ ...w })),
+        recorder: { ...p.recorder },
+        recorderDict: p.recorderDict,
+        simTime: p.simTime,
+        simStepCount: p.simStepCount,
+      });
+      return;
+    }
+    set({
+      ...base,
+      jointPositions: payload.jointPositions,
+      commandedJointPositions: [...payload.jointPositions],
+      jointTargets: [...payload.jointPositions],
+      referenceJointPositions: [...payload.jointPositions],
+      eeTarget: [...payload.robotInfo.eePos] as Vec3,
       eeTargetDirty: false,
       motionTargets: [],
       recorder: initialRecorder,
       recorderDict: null,
-    }),
+      simTime: 0,
+      simStepCount: 0,
+    });
+  },
 
   setLoadError: (message) =>
     set({
@@ -321,13 +409,21 @@ export const useSessionStore = create<SessionState>((set) => ({
       ...(dict !== undefined ? { recorderDict: dict } : {}),
     }),
 
+  syncSimUiFrame: (jointPositions, simTime, simStepCount, recorder) =>
+    set({
+      jointPositions: [...jointPositions],
+      simTime,
+      simStepCount,
+      recorder,
+    }),
+
   syncSimFrame: (jointPositions, simTime, simStepCount, recorder, recorderDict) =>
     set({
       jointPositions: [...jointPositions],
       simTime,
       simStepCount,
       recorder,
-      recorderDict,
+      ...(recorderDict !== undefined ? { recorderDict } : {}),
     }),
 
   setEndEffectorLink: (link) => set({ endEffectorLink: link }),
@@ -421,6 +517,17 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   clearMotionTargets: () => set({ motionTargets: [] }),
 
+  setMotionTargets: (motionTargets) =>
+    set({
+      motionTargets: motionTargets.map((t) => ({
+        ...t,
+        jointPositions: [...t.jointPositions],
+        eePosition: [...t.eePosition] as Vec3,
+        eeQuaternion: [...t.eeQuaternion] as Quat,
+        eeSceneWorld: [...t.eeSceneWorld] as [number, number, number],
+      })),
+    }),
+
   setInterpProfile: (interpProfile) => set({ interpProfile }),
 
   setExternalWrench: (link, wrench) =>
@@ -442,5 +549,29 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   clearPayloadRecords: () => set({ payloadRecords: [] }),
 
-  reset: () => set({ ...initialState, externalWrenches: new Map(), payloadRecords: [] }),
+  setPayloadFormDraft: (patch) =>
+    set((state) => ({
+      payloadFormDraft: {
+        ...state.payloadFormDraft,
+        ...patch,
+        wrenchDraft: patch.wrenchDraft
+          ? { ...state.payloadFormDraft.wrenchDraft, ...patch.wrenchDraft }
+          : state.payloadFormDraft.wrenchDraft,
+      },
+    })),
+
+  reset: () =>
+    set({
+      ...initialState,
+      externalWrenches: new Map(),
+      payloadRecords: [],
+      payloadFormDraft: {
+        ...initialPayloadFormDraft,
+        wrenchDraft: { ...initialPayloadFormDraft.wrenchDraft },
+      },
+    }),
 }));
+
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  (window as unknown as { __sessionStore: typeof useSessionStore }).__sessionStore = useSessionStore;
+}

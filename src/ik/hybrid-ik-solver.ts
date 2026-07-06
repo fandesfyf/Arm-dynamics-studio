@@ -16,7 +16,7 @@ export function createHybridIkSolver(
   closedChainBridge: ClosedChainIkBridge | null,
 ): IKSolver {
   return {
-    solve(pos, quat, qInit, options) {
+    solve(pos, _quat, qInit, options) {
       const seedJoints = qposToActuatedJoints(session, qInit);
       const positionOnly = isPositionOnlyGoal(options?.goalMode);
       const chainJointNames = closedChainBridge?.getChainJointNames() ?? session.jointNames;

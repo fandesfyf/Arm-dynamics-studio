@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:wasm-browser": "node scripts/browser-wasm-payload-test.mjs",
+    "package:test-arm-zip": "node scripts/package-test-arm-zip.mjs"
   },
   "dependencies": {
     "@mujoco/mujoco": "^3.10.0",
@@ -31,6 +33,7 @@
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
     "happy-dom": "^20.10.6",
+    "playwright": "^1.49.1",
     "typescript": "~5.6.2",
     "vite": "^5.4.11",
     "vitest": "^2.0.0"

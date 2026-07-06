@@ -4,7 +4,7 @@ import type {
   PinocchioLoadResult,
   RobotLoadInput,
 } from '../types/robot';
-import { loadMujocoRobot } from '../mujoco/loader';
+import { loadMujocoRobot, releaseActiveMujocoHandles } from '../mujoco/loader';
 import { loadPinocchioFromUrdf } from '../pinocchio/loader';
 import { buildJointMap } from '../pinocchio/joint-map';
 import { createJointMapAdapter } from '../pinocchio/joint-map-adapter';
@@ -12,7 +12,8 @@ import {
   applyFixedOriginsToPlacement,
   collectFixedOriginsToLink,
 } from '../utils/ee-frame-utils';
-import { resolveEndEffectorJointName } from '../utils/urdf-base-fixture';
+import { resolveEndEffectorJointName, detectBaseLink } from '../utils/urdf-base-fixture';
+import { buildUrdfLinkBodyBindings, type LinkBodyBinding } from '../mujoco/link-body-map';
 import { vecGet } from '../types/mujoco';
 import { ComputedTorqueController } from './controller';
 
@@ -30,6 +31,8 @@ export class RobotSession {
   readonly mujocoBundle: MujocoLoadResult;
   readonly pinocchioBundle: PinocchioLoadResult;
   readonly forwardKinematics: ForwardKinematics;
+  readonly linkBodyBindings: Map<string, LinkBodyBinding>;
+  readonly baseLink: string;
 
   private disposed = false;
 
@@ -38,11 +41,15 @@ export class RobotSession {
     pinocchioBundle: PinocchioLoadResult,
     jointMap: JointMapping[],
     forwardKinematics: ForwardKinematics,
+    linkBodyBindings: Map<string, LinkBodyBinding>,
+    baseLink: string,
   ) {
     this.mujocoBundle = mujocoBundle;
     this.pinocchioBundle = pinocchioBundle;
     this.jointMap = jointMap;
     this.forwardKinematics = forwardKinematics;
+    this.linkBodyBindings = linkBodyBindings;
+    this.baseLink = baseLink;
   }
 
   get mujoco() {
@@ -51,12 +58,17 @@ export class RobotSession {
 
   static async create(input: RobotLoadInput): Promise<RobotSession> {
     const meshes = input.meshes ?? new Map<string, Uint8Array>();
-    const mujocoBundle = await loadMujocoRobot({
+    const bundle = {
       urdfText: input.urdfXml,
       urdfFileName: input.urdfFileName ?? 'robot.urdf',
       meshes,
-    });
-    const pinocchioBundle = await loadPinocchioFromUrdf(input.urdfXml);
+      loadPhase: input.loadPhase,
+      urdfPrepared: input.urdfPrepared,
+    };
+    const [mujocoBundle, pinocchioBundle] = await Promise.all([
+      loadMujocoRobot(bundle),
+      loadPinocchioFromUrdf(input.urdfXml),
+    ]);
     const jointMap = buildJointMap(
       mujocoBundle.mujoco,
       mujocoBundle.model,
@@ -68,7 +80,21 @@ export class RobotSession {
       input.urdfXml,
       input.endEffectorLink,
     );
-    return new RobotSession(mujocoBundle, pinocchioBundle, jointMap, forwardKinematics);
+    const baseLink = detectBaseLink(input.urdfXml);
+    const linkBodyBindings = buildUrdfLinkBodyBindings(
+      mujocoBundle.mujoco,
+      mujocoBundle.model,
+      input.urdfXml,
+      baseLink,
+    );
+    return new RobotSession(
+      mujocoBundle,
+      pinocchioBundle,
+      jointMap,
+      forwardKinematics,
+      linkBodyBindings,
+      baseLink,
+    );
   }
 
   get model() {
@@ -113,8 +139,7 @@ export class RobotSession {
 
   dispose(): void {
     if (this.disposed) return;
-    this.mujocoBundle.data.delete();
-    this.mujocoBundle.model.delete();
+    releaseActiveMujocoHandles();
     this.disposed = true;
   }
 }

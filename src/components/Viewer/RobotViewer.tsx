@@ -5,6 +5,7 @@ import { useSessionStore } from '../../stores/session-store';
 import { useVizStore } from '../../stores/viz-store';
 import { EndEffectorControlsR3f } from '../../ik/end-effector-controls-r3f';
 import { MotionTargetMarkers } from './MotionTargetMarkers';
+import { ExternalWrenchMarkers } from './ExternalWrenchMarkers';
 import { ReferencePoseOverlay } from './ReferencePoseOverlay';
 import { UrdfModel } from './UrdfModel';
 
@@ -70,6 +71,7 @@ function SceneContent() {
       )}
       {robotInfo && showEeGizmo && <EndEffectorControlsR3f />}
       <MotionTargetMarkers />
+      <ExternalWrenchMarkers />
     </>
   );
 }

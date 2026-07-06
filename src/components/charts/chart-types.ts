@@ -118,3 +118,23 @@ export function bundleFromDataRecorder(
 ): ChartSeriesBundle {
   return bundleFromRecorderDict(recorder.toDict(), jointNames);
 }
+
+/** 按选中关节裁剪曲线（位置/速度/力矩 tab） */
+export function pickActiveSeries(
+  raw: ChartSeriesInput,
+  metric: ChartMetric,
+  jointNames: string[] | undefined,
+  selectedJoints: ReadonlySet<number>,
+): ChartSeriesInput {
+  if (metric === 'ee' || !jointNames?.length) return raw;
+  const indices = [...selectedJoints].sort((a, b) => a - b);
+  if (indices.length === 0) return raw;
+  const names = indices.map((i) => jointNames[i] ?? `j${i}`);
+  const pick = (rows: number[][]) => rows.map((row) => indices.map((i) => row[i] ?? 0));
+  return {
+    times: raw.times,
+    jointNames: names,
+    actual: pick(raw.actual),
+    desired: raw.desired ? pick(raw.desired) : null,
+  };
+}

@@ -51,6 +51,7 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  padding-left: 2px;
 }
 
 .sim-charts-plot {
@@ -96,6 +97,14 @@
   color: var(--color-text-secondary, #9b9bb8);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.chart-panel-recorder-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .chart-panel-export-btn {

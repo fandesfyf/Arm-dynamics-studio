@@ -3,6 +3,9 @@ import { JointVelocityLimitPlanner, type JointDesired } from './planner';
 
 export type JointInterpProfile = 'linear' | 'cubic';
 
+/** 三次样条 knot 时间最小间隔（零位移路点也须严格递增） */
+export const MIN_JOINT_WAYPOINT_SEGMENT_DT = 1e-4;
+
 function segmentDuration(
   qStart: ArrayLike<number>,
   qEnd: ArrayLike<number>,
@@ -19,7 +22,8 @@ function buildKnotTimes(
 ): number[] {
   const times = [0];
   for (let i = 1; i < qWaypoints.length; i++) {
-    const dt = segmentDuration(qWaypoints[i - 1]!, qWaypoints[i]!, maxVel, nv);
+    const raw = segmentDuration(qWaypoints[i - 1]!, qWaypoints[i]!, maxVel, nv);
+    const dt = raw > 0 ? raw : MIN_JOINT_WAYPOINT_SEGMENT_DT;
     times.push(times[i - 1]! + dt);
   }
   return times;

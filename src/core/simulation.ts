@@ -8,7 +8,7 @@ import type {
 } from '../types/simulation';
 import { angleDiff, ComputedTorqueController, gainsFromMassDiagonal, type AutoGainOptions } from './controller';
 import { JointMultiWaypointPlanner, type JointInterpProfile } from './joint-waypoint-planner';
-import { DataRecorder } from './data-recorder';
+import { DataRecorder, type SimulationRecord } from './data-recorder';
 import {
   ConstantJointPlanner,
   JointInterpolationPlanner,
@@ -43,6 +43,64 @@ export interface IKSolver {
 }
 
 export const CONTROL_DT = 0.002;
+
+interface RealtimePaceState {
+  wallStartMs: number;
+  stepsCompleted: number;
+  /** 暂停期间累计的墙钟偏移，避免恢复后追赶步进 */
+  pauseSlipMs: number;
+}
+
+function createRealtimePaceState(enabled: boolean): RealtimePaceState | null {
+  if (!enabled) return null;
+  return { wallStartMs: performance.now(), stepsCompleted: 0, pauseSlipMs: 0 };
+}
+
+async function awaitRealtimePace(
+  controlDt: number,
+  state: RealtimePaceState | null,
+): Promise<void> {
+  if (!state) return;
+  state.stepsCompleted += 1;
+  const targetMs =
+    state.wallStartMs + state.pauseSlipMs + state.stepsCompleted * controlDt * 1000;
+  const delay = targetMs - performance.now();
+  if (delay > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+async function waitUnlessCancelled(
+  options: RunToTargetOptions,
+  paceState: RealtimePaceState | null,
+): Promise<boolean> {
+  let pauseAnchor: number | null = null;
+  while (options.pauseCheck?.()) {
+    if (pauseAnchor === null) pauseAnchor = performance.now();
+    await new Promise((r) => setTimeout(r, 50));
+    if (options.cancelCheck?.()) return false;
+  }
+  if (pauseAnchor !== null && paceState) {
+    paceState.pauseSlipMs += performance.now() - pauseAnchor;
+  }
+  return !options.cancelCheck?.();
+}
+
+async function afterSimulationStep(
+  controlDt: number,
+  stepIndex: number,
+  options: RunToTargetOptions,
+  paceState: RealtimePaceState | null,
+): Promise<void> {
+  if (paceState) {
+    await awaitRealtimePace(controlDt, paceState);
+    return;
+  }
+  const yieldEvery = options.yieldEvery ?? 25;
+  if (options.onYield && (stepIndex + 1) % yieldEvery === 0) {
+    await options.onYield();
+  }
+}
 
 function arrayNorm(v: ArrayLike<number>): number {
   let sum = 0;
@@ -118,6 +176,9 @@ export class SimulationEngine {
   externalWrenches = new Map<string, Wrench6>();
 
   private qPrev: Float64Array | null = null;
+  private lastQDesired = new Float64Array(0);
+  private lastQvelDesired = new Float64Array(0);
+  private lastTauCmd = new Float64Array(0);
 
   constructor(
     private readonly session: RobotSession,
@@ -159,6 +220,32 @@ export class SimulationEngine {
     }
   }
 
+  /** 实时曲线采样：用当前物理状态 + 最近指令，时间轴由调用方填入墙钟秒 */
+  sampleForChart(): Omit<SimulationRecord, 'time'> {
+    const { model, data, nq, nv, forwardKinematics: fk } = this.session;
+    const q_d =
+      this.lastQDesired.length === nq
+        ? this.lastQDesired
+        : readQposN(model, data, nq);
+    const v_d =
+      this.lastQvelDesired.length === nv
+        ? this.lastQvelDesired
+        : readQvelN(model, data, nv);
+    const tau =
+      this.lastTauCmd.length === nv ? this.lastTauCmd : readTau(data, model, nv);
+    const state = buildStepState(this.simTime, model, data, nq, nv, q_d, v_d, tau, fk);
+    return {
+      qpos: Array.from(state.qpos),
+      qvel: Array.from(state.qvel),
+      tau: Array.from(state.tau),
+      q_desired: Array.from(state.q_desired),
+      qvel_desired: Array.from(state.qvel_desired),
+      tau_commanded: Array.from(state.tau_commanded),
+      ee_pos: [...state.ee_pos],
+      ee_quat: [...state.ee_quat],
+    };
+  }
+
   /** 单步 hold 控制：跟踪恒定 qDesired（实时循环用） */
   stepHoldTarget(
     qDesired: ArrayLike<number>,
@@ -187,24 +274,15 @@ export class SimulationEngine {
     const qStart = readQposN(this.session.model, this.session.data, nq);
     const planner = new JointInterpolationPlanner(qStart, qEnd, duration, nv);
     const maxSteps = Math.max(1, Math.ceil(duration / this.controlDt));
-    const yieldEvery = options.yieldEvery ?? 25;
+    const paceState = createRealtimePaceState(options.realtimePacing !== false);
 
     this.isRunning = true;
 
     for (let i = 0; i < maxSteps; i++) {
-      if (options.cancelCheck?.()) {
+      if (!(await waitUnlessCancelled(options, paceState))) {
         this.isRunning = false;
         options.doneCallback?.(false, '用户取消');
         return false;
-      }
-
-      while (options.pauseCheck?.()) {
-        await new Promise((r) => setTimeout(r, 50));
-        if (options.cancelCheck?.()) {
-          this.isRunning = false;
-          options.doneCallback?.(false, '用户取消');
-          return false;
-        }
       }
 
       const t = i * this.controlDt;
@@ -215,9 +293,7 @@ export class SimulationEngine {
       this.integrateControlStep(tau);
       this.emitStep(this.simTime, q_d, v_d, tau, options.stepCallback);
 
-      if (options.onYield && (i + 1) % yieldEvery === 0) {
-        await options.onYield();
-      }
+      await afterSimulationStep(this.controlDt, i, options, paceState);
     }
 
     this.isRunning = false;
@@ -237,25 +313,16 @@ export class SimulationEngine {
     const planner = new JointVelocityLimitPlanner(qStart, qEnd, maxVel, nv);
     const duration = planner.getDuration();
     const maxSteps = Math.max(1, Math.ceil(duration / this.controlDt) + 2);
-    const yieldEvery = options.yieldEvery ?? 25;
     const tol = options.tol ?? 0.01;
+    const paceState = createRealtimePaceState(options.realtimePacing !== false);
 
     this.isRunning = true;
 
     for (let i = 0; i < maxSteps; i++) {
-      if (options.cancelCheck?.()) {
+      if (!(await waitUnlessCancelled(options, paceState))) {
         this.isRunning = false;
         options.doneCallback?.(false, '用户取消');
         return false;
-      }
-
-      while (options.pauseCheck?.()) {
-        await new Promise((r) => setTimeout(r, 50));
-        if (options.cancelCheck?.()) {
-          this.isRunning = false;
-          options.doneCallback?.(false, '用户取消');
-          return false;
-        }
       }
 
       const t = i * this.controlDt;
@@ -270,9 +337,7 @@ export class SimulationEngine {
         break;
       }
 
-      if (options.onYield && (i + 1) % yieldEvery === 0) {
-        await options.onYield();
-      }
+      await afterSimulationStep(this.controlDt, i, options, paceState);
     }
 
     this.isRunning = false;
@@ -297,25 +362,16 @@ export class SimulationEngine {
     const planner = new JointMultiWaypointPlanner(qWaypoints, maxVel, nv, profile);
     const duration = planner.getDuration();
     const maxSteps = Math.max(1, Math.ceil(duration / this.controlDt) + 2);
-    const yieldEvery = options.yieldEvery ?? 25;
     const tol = options.tol ?? 0.01;
+    const paceState = createRealtimePaceState(options.realtimePacing !== false);
 
     this.isRunning = true;
 
     for (let i = 0; i < maxSteps; i++) {
-      if (options.cancelCheck?.()) {
+      if (!(await waitUnlessCancelled(options, paceState))) {
         this.isRunning = false;
         options.doneCallback?.(false, '用户取消');
         return false;
-      }
-
-      while (options.pauseCheck?.()) {
-        await new Promise((r) => setTimeout(r, 50));
-        if (options.cancelCheck?.()) {
-          this.isRunning = false;
-          options.doneCallback?.(false, '用户取消');
-          return false;
-        }
       }
 
       const t = i * this.controlDt;
@@ -330,9 +386,7 @@ export class SimulationEngine {
         break;
       }
 
-      if (options.onYield && (i + 1) % yieldEvery === 0) {
-        await options.onYield();
-      }
+      await afterSimulationStep(this.controlDt, i, options, paceState);
     }
 
     this.isRunning = false;
@@ -355,26 +409,17 @@ export class SimulationEngine {
     const nv = this.session.nv;
     const planner = new ConstantJointPlanner(qTarget, nv);
     const target = planner.getTarget();
-    const yieldEvery = options.yieldEvery ?? 25;
+    const paceState = createRealtimePaceState(options.realtimePacing !== false);
 
     this.isRunning = true;
     const maxSteps = Math.ceil(maxTime / this.controlDt);
     let reached = false;
 
     for (let i = 0; i < maxSteps; i++) {
-      if (options.cancelCheck?.()) {
+      if (!(await waitUnlessCancelled(options, paceState))) {
         this.isRunning = false;
         options.doneCallback?.(false, '用户取消');
         return false;
-      }
-
-      while (options.pauseCheck?.()) {
-        await new Promise((r) => setTimeout(r, 50));
-        if (options.cancelCheck?.()) {
-          this.isRunning = false;
-          options.doneCallback?.(false, '用户取消');
-          return false;
-        }
       }
 
       const t = i * this.controlDt;
@@ -389,14 +434,13 @@ export class SimulationEngine {
       const velError = arrayNorm(qvelCurrent);
       if (posError < tol && velError < tol * 10) {
         reached = true;
+        this.emitStep(this.simTime, q_d, v_d, tau, options.stepCallback);
         break;
       }
 
       this.emitStep(this.simTime, q_d, v_d, tau, options.stepCallback);
 
-      if (options.onYield && (i + 1) % yieldEvery === 0) {
-        await options.onYield();
-      }
+      await afterSimulationStep(this.controlDt, i, options, paceState);
     }
 
     this.isRunning = false;
@@ -547,6 +591,11 @@ export class SimulationEngine {
         this.session.data,
         this.externalWrenches,
         this.session.nv,
+        {
+          linkBodyBindings: this.session.linkBodyBindings,
+          baseLink: this.session.baseLink,
+          zeroQfrcBeforeApply: this.session.nu > 0,
+        },
       );
       mjStep(this.session.mujoco, this.session.model, this.session.data);
       this.simTime += this.physicsDt;
@@ -560,6 +609,9 @@ export class SimulationEngine {
     tauCommanded: Float64Array,
     stepCallback?: (state: SimulationStepState) => void,
   ): void {
+    this.lastQDesired = new Float64Array(qDesired);
+    this.lastQvelDesired = new Float64Array(qvelDesired);
+    this.lastTauCmd = new Float64Array(tauCommanded);
     const state = buildStepState(
       time,
       this.session.model,

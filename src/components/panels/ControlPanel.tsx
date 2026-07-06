@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useSessionStore, type IkLiveStatus } from '../../stores/session-store';
 import type { ControlLayer, ControlMode } from '../../stores/session-store';
 import { listEndEffectorLinkCandidates } from '../../utils/urdf-base-fixture';
@@ -15,6 +15,8 @@ export interface ControlPanelProps {
   onControllerKdDampingChange?: (value: number) => void;
   onResetReference?: () => void;
   onResetGizmo?: () => void;
+  onExportMotionTargets?: () => void;
+  onImportMotionTargets?: (file: File) => void | Promise<void>;
   disabled?: boolean;
 }
 
@@ -40,6 +42,8 @@ export function ControlPanel({
   onControllerKdDampingChange,
   onResetReference,
   onResetGizmo,
+  onExportMotionTargets,
+  onImportMotionTargets,
   disabled,
 }: ControlPanelProps) {
   const robotInfo = useSessionStore((s) => s.robotInfo);
@@ -73,10 +77,15 @@ export function ControlPanel({
 
   const eeLinkOptions = useMemo(() => {
     if (!urdfText) return [];
-    return listEndEffectorLinkCandidates(urdfText);
-  }, [urdfText]);
+    const links = listEndEffectorLinkCandidates(urdfText);
+    if (endEffectorLink && !links.includes(endEffectorLink)) {
+      return [endEffectorLink, ...links];
+    }
+    return links;
+  }, [urdfText, endEffectorLink]);
 
   const [addTargetBusy, setAddTargetBusy] = useState(false);
+  const importCsvInputRef = useRef<HTMLInputElement>(null);
 
   if (!robotInfo) {
     return (
@@ -91,7 +100,6 @@ export function ControlPanel({
   const modeLocked = disabled || interpolationActive || (running && controlMode === 'realtime');
   const slidersDisabled = disabled || interpolationActive;
   const axes: Array<'x' | 'y' | 'z'> = ['x', 'y', 'z'];
-  const eeLayer = controlLayer === 'ee';
 
   const handleLayer = (layer: ControlLayer) => setControlLayer(layer);
   const handleMode = (mode: ControlMode) => setControlMode(mode);
@@ -241,18 +249,44 @@ export function ControlPanel({
             title={`目标队列 (${motionTargets.length})`}
             defaultOpen={false}
           >
-            {motionTargets.length > 0 && (
-              <div className="motion-target-list-header">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-compact"
-                  disabled={disabled || interpolationActive}
-                  onClick={() => clearMotionTargets()}
-                >
-                  清空
-                </button>
-              </div>
-            )}
+            <div className="motion-target-toolbar">
+              <button
+                type="button"
+                className="btn btn-ghost btn-compact"
+                disabled={disabled || interpolationActive || motionTargets.length === 0}
+                onClick={() => clearMotionTargets()}
+              >
+                清空
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-compact"
+                disabled={disabled}
+                onClick={() => importCsvInputRef.current?.click()}
+              >
+                导入 CSV
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-compact"
+                disabled={disabled || motionTargets.length === 0}
+                onClick={() => onExportMotionTargets?.()}
+              >
+                导出 CSV
+              </button>
+              <input
+                ref={importCsvInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+                disabled={disabled}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void onImportMotionTargets?.(file);
+                }}
+              />
+            </div>
             {motionTargets.length === 0 ? (
               <p className="hint">
                 调整关节或末端目标后点「添加目标」加入队列；「执行」按队列顺序插值（队列为空时执行当前单帧目标）。

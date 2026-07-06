@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { bipedAssetsPlugin } from './vite-biped-assets';
+import { debugDumpPlugin } from './vite-debug-dump';
 
 export default defineConfig({
-  plugins: [react(), bipedAssetsPlugin()],
+  plugins: [react(), bipedAssetsPlugin(), debugDumpPlugin()],
   assetsInclude: ['**/*.wasm'],
   optimizeDeps: {
     exclude: ['@mujoco/mujoco'],

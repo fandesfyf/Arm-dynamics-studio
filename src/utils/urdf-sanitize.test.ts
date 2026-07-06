@@ -139,13 +139,43 @@ describe('sanitizeUrdfForMujoco', () => {
     expect(sanitized).toMatch(/\bixx="0\.01"/);
   });
 
-  it('separates inertia self-close from inertial end tag', () => {
+  it('tightens all self-closing tags for WASM', () => {
+    const loose = `<robot><link name="a"><inertial><origin xyz="0 0 0" rpy="0 0 0" /><mass value="1"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01" /></inertial></link></robot>`;
+    const fixed = sanitizeUrdfForMujoco(loose);
+    expect(fixed).not.toMatch(/ \/>/);
+    expect(fixed).toMatch(/rpy="0 0 0"\/>/);
+    expect(fixed).toMatch(/izz="0\.01"\/>/);
+  });
+
+  it('tightens space before slash on inertia tags', () => {
+    const loose = `<robot><link name="a"><inertial><mass value="1"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01" /></inertial></link></robot>`;
+    const fixed = sanitizeUrdfForMujoco(loose);
+    expect(fixed).not.toMatch(/<inertia\b[^>]*?\s+\/>/);
+    expect(fixed).toMatch(/izz="0\.01"\/>/);
+  });
+
+  it('does not corrupt valid self-closing inertia except tightening slash', () => {
     const urdf = readFileSync(
-      join(__dirname, '../fixtures/biped_s70_upper_body_sanitized.urdf'),
+      join(__dirname, '../fixtures/biped_user_download_v2.urdf'),
       'utf-8',
     );
+    const before = urdf.match(
+      /<link name="base_link"[\s\S]*?<inertia\b[\s\S]*?\/>/,
+    )?.[0];
+    expect(before).toBeTruthy();
     const sanitized = sanitizeUrdfForMujoco(urdf);
-    expect(sanitized).not.toMatch(/<inertia\b[^>]*\/><\/inertial>/);
-    expect(() => finalizeUrdfForMujoco(urdf)).not.toThrow();
+    expect(sanitized).not.toMatch(/<inertia\b[^>]*?\s+\/>/);
+    const after = sanitized.match(
+      /<link name="base_link"[\s\S]*?<inertia\b[\s\S]*?(?:\/>|><\/inertia>)/,
+    )?.[0];
+    expect(after).toBeTruthy();
+    expect(after).toMatch(/\bixx="/);
+  });
+
+  it('rejects WASM-breaking space before closing bracket', () => {
+    const bad = `<robot><link name="a"><inertial><mass value="1"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01" /></inertial></link></robot>`;
+    expect(() => validateUrdfInertiaForMujoco(bad)).toThrow(/inertia.*空格/);
+    const fixed = sanitizeUrdfForMujoco(bad);
+    expect(() => validateUrdfInertiaForMujoco(fixed)).not.toThrow();
   });
 });

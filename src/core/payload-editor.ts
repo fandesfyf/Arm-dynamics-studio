@@ -2,6 +2,7 @@ import type { InertiaTensor } from './mass-editor';
 import { MassEditor } from './mass-editor';
 import { parseLinkNames } from '../utils/urdf-base-fixture';
 import { formatInertiaTag, sanitizeUrdfForMujoco } from '../utils/urdf-sanitize';
+import { isUrdfDebugEnabled, logUrdfSnippet } from '../utils/urdf-debug';
 
 /** 6D 外力/力矩 [fx, fy, fz, tx, ty, tz]，link 坐标系 */
 export type Wrench6 = [number, number, number, number, number, number];
@@ -47,6 +48,18 @@ export interface PayloadRecord {
 
 /** 球体负载 link 命名约定：{parent}_payload[_N]_sphere[_M] */
 export const SPHERE_PAYLOAD_LINK_PATTERN = /_payload(?:_\d+)?_sphere(?:_\d+)?$/;
+
+/** 3D 视图中球体负载显示色（深褐色） */
+export const SPHERE_PAYLOAD_VISUAL_COLOR = '#5c4033';
+
+export interface SpherePayloadDisplayItem {
+  id: string;
+  kind: PayloadKind;
+  parentLink: string;
+  payloadLink?: string;
+  mass: number;
+  radius: number;
+}
 
 const WRENCH_KEYS = ['fx', 'fy', 'fz', 'tx', 'ty', 'tz'] as const;
 const MIN_INERTIA_VALUE = 0.001;
@@ -273,8 +286,12 @@ export function appendSpherePayloadWithRecord(
     mass,
     radius,
   };
+  const urdfTextOut = insertBeforeRobotClose(urdfText, injection);
+  if (isUrdfDebugEnabled()) {
+    logUrdfSnippet('appendSpherePayload', urdfTextOut);
+  }
   return {
-    urdfText: sanitizeUrdfForMujoco(insertBeforeRobotClose(urdfText, injection)),
+    urdfText: urdfTextOut,
     record,
   };
 }
@@ -282,6 +299,75 @@ export function appendSpherePayloadWithRecord(
 /** 从 URDF 文本推断已添加的球体负载 link（按文档顺序） */
 export function listSpherePayloadLinks(urdfText: string): string[] {
   return parseLinkNames(urdfText).filter((name) => SPHERE_PAYLOAD_LINK_PATTERN.test(name));
+}
+
+function getSpherePayloadParentLink(doc: Document, payloadLink: string): string | null {
+  const robot = doc.querySelector('robot');
+  if (!robot) return null;
+  for (const joint of robot.querySelectorAll(':scope > joint')) {
+    const child = joint.querySelector(':scope > child')?.getAttribute('link');
+    if (child !== payloadLink) continue;
+    return joint.querySelector(':scope > parent')?.getAttribute('link') ?? null;
+  }
+  return null;
+}
+
+function parseSphereLinkMassRadius(
+  linkEl: Element,
+): { mass: number; radius: number } | null {
+  const mass = Number(linkEl.querySelector(':scope > inertial > mass')?.getAttribute('value'));
+  const radius = Number(
+    linkEl.querySelector(':scope > visual geometry sphere')?.getAttribute('radius') ??
+      linkEl.querySelector(':scope > collision geometry sphere')?.getAttribute('radius'),
+  );
+  if (!Number.isFinite(mass) || !Number.isFinite(radius) || mass <= 0 || radius <= 0) {
+    return null;
+  }
+  return { mass, radius };
+}
+
+/** 汇总当前 URDF 中的球体负载（优先 payloadRecords，并补齐 URDF 中未记录的子 link） */
+export function listSpherePayloadDisplayItems(
+  urdfText: string,
+  records: PayloadRecord[],
+): SpherePayloadDisplayItem[] {
+  const items: SpherePayloadDisplayItem[] = records.map((record) => ({
+    id: record.id,
+    kind: record.kind,
+    parentLink: record.parentLink,
+    payloadLink: record.payloadLink,
+    mass: record.mass,
+    radius: record.radius,
+  }));
+
+  const doc = parseUrdfDocument(urdfText);
+  const robot = doc.querySelector('robot');
+  if (!robot) return items;
+
+  const knownPayloadLinks = new Set(
+    items.filter((item) => item.payloadLink).map((item) => item.payloadLink!),
+  );
+
+  for (const linkName of listSpherePayloadLinks(urdfText)) {
+    if (knownPayloadLinks.has(linkName)) continue;
+    const linkEl = Array.from(robot.querySelectorAll(':scope > link')).find(
+      (el) => el.getAttribute('name') === linkName,
+    );
+    if (!linkEl) continue;
+    const parsed = parseSphereLinkMassRadius(linkEl);
+    const parentLink = getSpherePayloadParentLink(doc, linkName);
+    if (!parsed || !parentLink) continue;
+    items.push({
+      id: linkName,
+      kind: 'child_link',
+      parentLink,
+      payloadLink: linkName,
+      mass: parsed.mass,
+      radius: parsed.radius,
+    });
+  }
+
+  return items;
 }
 
 function parseUrdfDocument(urdfText: string): Document {

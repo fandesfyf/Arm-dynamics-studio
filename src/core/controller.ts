@@ -12,6 +12,10 @@ const MIN_KP = 0.5;
 const MIN_INERTIA = 1e-6;
 const DEFAULT_TORQUE_LIMIT = 100.0;
 
+/** 浏览器 WASM 下 mj_fullM 会破坏后续 URDF 编译（MuJoCo XML 解析器状态损坏） */
+const avoidMjFullMInBrowser =
+  typeof window !== 'undefined' && import.meta.env.MODE !== 'test';
+
 /** 关节角误差（处理 2π 环绕） */
 export function angleDiff(qTarget: ArrayLike<number>, qCurrent: ArrayLike<number>): Float64Array {
   const n = qTarget.length;
@@ -73,18 +77,13 @@ export class ComputedTorqueController {
     private readonly data: MjData,
     private readonly nv: number,
     torqueLimits?: ArrayLike<number>,
-    initialQpos?: ArrayLike<number>,
+    _initialQpos?: ArrayLike<number>,
     nq?: number,
   ) {
     this.nq = nq ?? model.nq;
-    const q0 =
-      initialQpos !== undefined
-        ? Float64Array.from(initialQpos)
-        : vecGet(this.data.qpos, this.nq);
-    const diagM = this.massMatrixDiagonal(q0);
-    const gains = gainsFromMassDiagonal(diagM);
-    this.kp = gains.kp;
-    this.kd = gains.kd;
+    // 增益在 loadRobot → recomputeAutoGains 中计算；构造时避免逆动力学/mj_fullM 拖慢加载
+    this.kp = new Float64Array(this.nv).fill(MIN_KP * 20);
+    this.kd = new Float64Array(this.nv).fill(MIN_KP * 2);
     this.torqueLimits = new Float64Array(this.nv);
     for (let i = 0; i < this.nv; i++) {
       const limit = torqueLimits?.[i];
@@ -93,9 +92,16 @@ export class ComputedTorqueController {
     }
   }
 
-  /** diag(mj_fullM(q))；若 WASM 稠密缓冲异常则从逆动力学回退 */
+  /** diag(mj_fullM(q))；浏览器 WASM 用逆动力学估计，避免 mj_fullM 导致模型无法重载 */
   massMatrixDiagonal(q: ArrayLike<number>): Float64Array {
     const saved = saveMjState(this.data, this.model);
+    if (avoidMjFullMInBrowser) {
+      const diag = this.massDiagonalFromInverse(q);
+      restoreMjState(this.data, this.model, saved);
+      this.mujoco.mj_forward(this.model, this.data);
+      return diag;
+    }
+
     vecSet(this.data.qpos, q, this.nq);
     vecZero(this.data.qvel, this.nv);
     vecZero(this.data.qacc, this.nv);
