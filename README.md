@@ -75,7 +75,7 @@ npm run test:watch  # 监听模式
 | **Build command** | `npm run build` |
 | **Deploy command** | `npx wrangler deploy`（默认） |
 
-注意：**Dashboard 中的 Worker 名称**须与 `wrangler.jsonc` 里 `"name"` 一致（当前为 `arm-dynamics-sim`），否则部署会失败。
+注意：**Dashboard 中的 Worker 名称**须与 `wrangler.jsonc` 里 `"name"` 一致（当前为 `arm-dynamics-studio`），否则部署会失败。SPA 路由由 `assets.not_found_handling` 处理，勿使用 `public/_redirects`（Workers 上会触发无限循环）。
 
 可选环境变量：`NODE_VERSION=20`、`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`。
 

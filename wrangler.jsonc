@@ -1,7 +1,8 @@
 {
-  "name": "arm-dynamics-sim",
+  "name": "arm-dynamics-studio",
   "compatibility_date": "2026-01-10",
   "assets": {
-    "directory": "./dist"
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
   }
 }
