@@ -1,0 +1,4 @@
+# Cloudflare Pages（Git 集成时在 Dashboard 也可配置相同项）
+name = "arm-dynamics-sim-web"
+pages_build_output_dir = "dist"
+compatibility_date = "2024-09-23"

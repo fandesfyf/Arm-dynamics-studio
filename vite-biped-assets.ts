@@ -8,6 +8,7 @@ const BIPED_ROOT = '/home/fandes/biped_s70';
 export function bipedAssetsPlugin(): Plugin {
   return {
     name: 'biped-assets',
+    apply: 'serve',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const rawUrl = req.url?.split('?')[0] ?? '';

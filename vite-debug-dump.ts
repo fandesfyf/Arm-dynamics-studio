@@ -64,6 +64,7 @@ function writeRobotBundle(body: BundleBody): string {
 export function debugDumpPlugin(): Plugin {
   return {
     name: 'debug-dump',
+    apply: 'serve',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         if (req.method !== 'POST') {

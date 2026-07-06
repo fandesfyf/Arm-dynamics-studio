@@ -63,6 +63,31 @@ npm test            # Vitest 单元测试
 npm run test:watch  # 监听模式
 ```
 
+## Cloudflare Pages 部署
+
+本项目为**纯静态 SPA**：构建产物在 `dist/`，无 Node 服务端。MuJoCo / Pinocchio 以 WASM 在浏览器中运行。
+
+在 Cloudflare Pages 中建议配置：
+
+| 项 | 值 |
+|----|-----|
+| 根目录 | 仓库根（即含 `package.json` 的 `web/` 目录） |
+| 构建命令 | `npm run build` |
+| 输出目录 | `dist` |
+| Node 版本 | `20`（或使用仓库内 `.node-version`） |
+
+可选环境变量（推荐）：
+
+- `NODE_VERSION=20`
+- `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`（跳过 Playwright 浏览器下载，加快 CI）
+- `NODE_OPTIONS=--max-old-space-size=4096`（若构建因内存不足失败）
+
+构建日志中的 `fs` / `path` externalized 警告来自 WASM 依赖，**可忽略**；本地 `npm run build` 能完成即表示可部署。
+
+`public/_headers` 已为 `.wasm` 设置 `Content-Type: application/wasm`；`public/_redirects` 提供 SPA 回退。
+
+> 默认 biped 模型的 STL 在开发环境通过本机 `/biped-assets` 提供；线上请用「加载 test_arm」或上传 `public/robots/test_arm.zip` 测试。
+
 ## 项目结构
 
 ```
