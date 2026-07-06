@@ -14,7 +14,7 @@ import { RobotSession } from './robot-session';
 import { nvGainsToActuated } from '../utils/joint-qpos';
 import { ensureFixedBase } from '../utils/urdf-base-fixture';
 
-const urdfPath = resolve(__dirname, '../../public/robots/test_arm.urdf');
+const urdfPath = resolve(__dirname, '../fixtures/simple_test_arm.urdf');
 const urdfXml = readFileSync(urdfPath, 'utf-8');
 const upperBodyPath = resolve(__dirname, '../../public/robots/biped_s70_upper_body.urdf');
 const upperBodyXml = readFileSync(upperBodyPath, 'utf-8');

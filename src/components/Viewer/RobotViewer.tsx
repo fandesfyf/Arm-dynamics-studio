@@ -112,7 +112,7 @@ export function RobotViewer(_props: RobotViewerProps) {
           <span className="viewer-empty-icon" aria-hidden>🦾</span>
           <p className="viewer-empty-title">尚未加载机器人模型</p>
           <p className="viewer-empty-hint">
-            正在加载默认模型 <code>biped_s70_upper_body</code>…
+            正在加载默认模型 <code>{import.meta.env.PROD ? 'test_arm' : 'biped_s70_upper_body'}</code>…
           </p>
         </div>
       )}

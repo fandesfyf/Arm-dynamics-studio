@@ -13,6 +13,10 @@ import { StatusBadge } from './components/ui/StatusBadge';
 import { AppMenuBar } from './components/layout/AppMenuBar';
 import { DockSidebar, DockBottom } from './components/layout/DockSidebar';
 import { prefetchDefaultBipedUpperBody } from './utils/biped-default-loader';
+import {
+  prefetchBundledTestArm,
+  shouldUseBundledTestArmAsDefault,
+} from './utils/test-arm-loader';
 
 function simStatusLabel(status: string): string {
   switch (status) {
@@ -52,6 +56,7 @@ export default function App() {
   const {
     loadRobot,
     loadDefaultBiped,
+    loadTestArm,
     reloadUrdf,
     applyBaseLink,
     applyEndEffectorLink,
@@ -121,6 +126,7 @@ export default function App() {
       import('./pinocchio/loader').then((m) => m.getPinocchioModule()),
     ]);
     prefetchDefaultBipedUpperBody();
+    prefetchBundledTestArm();
   }, []);
 
   useEffect(() => {
@@ -129,11 +135,12 @@ export default function App() {
       return;
     }
     defaultLoadedRef.current = true;
-    void loadDefaultBiped().catch((e) => {
+    const loadDefault = shouldUseBundledTestArmAsDefault() ? loadTestArm : loadDefaultBiped;
+    void loadDefault().catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
       useSessionStore.getState().setLoadError(`默认模型加载失败: ${msg}`);
     });
-  }, [loadDefaultBiped]);
+  }, [loadDefaultBiped, loadTestArm]);
 
   const payloadMutateDisabled = loading || simStatus === 'running';
   const payloadFormDisabled = loading;
@@ -163,7 +170,7 @@ export default function App() {
       model: (
         <ModelPanel
           onRobotLoaded={(result) => loadRobot(result.urdfText, result.urdfFileName, result.meshes)}
-          onLoadDefault={loadDefaultBiped}
+          onLoadTestArm={() => loadTestArm()}
           onApplyBaseLink={(link) => void applyBaseLink(link)}
           onUrdfChanged={(xml) => void reloadUrdf(xml)}
           onResetRobotPose={() => resetRobotPose()}
@@ -174,7 +181,7 @@ export default function App() {
     }),
     [
       applyBaseLink,
-      loadDefaultBiped,
+      loadTestArm,
       loadRobot,
       loading,
       reloadUrdf,

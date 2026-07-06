@@ -171,24 +171,21 @@ describe('robot-asset-loader', () => {
     120_000,
   );
 
-  it('extractRobotFromZip loads bundled test_arm.zip with simplified meshes', async () => {
+  it('extractRobotFromZip loads bundled test_arm.zip with biped_v3_arm meshes', async () => {
     const buffer = readFileSync(TEST_ARM_ZIP);
     const bundle = await extractRobotFromZip(buffer);
     expect(bundle.urdfFileName).toBe('urdf/test_arm.urdf');
-    expect(bundle.meshes.size).toBe(7);
+    expect(bundle.meshes.size).toBeGreaterThanOrEqual(16);
     expect(bundle.urdfText).toContain('<robot name="test_arm"');
+    expect(bundle.urdfText).toContain('zarm_l1_joint');
     const session = await RobotSession.create({
       urdfXml: bundle.urdfText,
       urdfFileName: bundle.urdfFileName,
       meshes: bundle.meshes,
     });
-    expect(session.jointNames).toEqual([
-      'joint1',
-      'joint2',
-      'joint3',
-      'joint4',
-      'joint5',
-    ]);
+    expect(session.jointNames.length).toBeGreaterThanOrEqual(14);
+    expect(session.jointNames).toContain('zarm_l1_joint');
+    expect(session.jointNames).toContain('zarm_r7_joint');
     session.dispose();
   });
 });

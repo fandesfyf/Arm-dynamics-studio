@@ -230,23 +230,20 @@ export function RobotUpload({ onLoadTestArm, onRobotLoaded }: RobotUploadProps) 
           <p className="hint">
             「{urdfPick.label}」内含 {urdfPick.candidates.length} 个 URDF，请选择要加载的模型：
           </p>
-          <div className="urdf-pick-list" role="listbox" aria-label="URDF 文件">
-            {urdfPick.candidates.map((path) => (
-              <button
-                key={path}
-                type="button"
-                role="option"
-                aria-selected={selectedUrdf === path}
-                className={['urdf-pick-item', selectedUrdf === path ? 'active' : '']
-                  .filter(Boolean)
-                  .join(' ')}
-                disabled={loading}
-                onClick={() => setSelectedUrdf(path)}
-              >
-                {path}
-              </button>
-            ))}
-          </div>
+          <label className="urdf-pick-row">
+            <span>URDF 文件</span>
+            <select
+              value={selectedUrdf}
+              disabled={loading}
+              onChange={(e) => setSelectedUrdf(e.target.value)}
+            >
+              {urdfPick.candidates.map((path) => (
+                <option key={path} value={path}>
+                  {path}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="button-row">
             <button type="button" disabled={loading} onClick={() => void confirmUrdfPick()}>
               加载所选 URDF

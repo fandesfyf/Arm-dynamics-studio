@@ -6,7 +6,7 @@ import { MassEditorPanel } from './MassEditorPanel';
 
 export interface ModelPanelProps {
   onRobotLoaded: (result: RobotUploadResult) => Promise<void>;
-  onLoadDefault: () => Promise<void>;
+  onLoadTestArm: () => Promise<void>;
   onApplyBaseLink: (link: string) => void;
   onUrdfChanged: (xml: string) => void;
   onResetRobotPose?: () => void;
@@ -74,7 +74,7 @@ function JointPreviewSection({ disabled }: { disabled?: boolean }) {
 
 export default function ModelPanel({
   onRobotLoaded,
-  onLoadDefault,
+  onLoadTestArm,
   onApplyBaseLink,
   onUrdfChanged,
   onResetRobotPose,
@@ -88,7 +88,7 @@ export default function ModelPanel({
 
   return (
     <>
-      <RobotUpload onLoadTestArm={onLoadDefault} onRobotLoaded={onRobotLoaded} />
+      <RobotUpload onLoadTestArm={onLoadTestArm} onRobotLoaded={onRobotLoaded} />
       {robotInfo && (
         <section className="panel-section panel-section--compact">
           <div className="button-row">

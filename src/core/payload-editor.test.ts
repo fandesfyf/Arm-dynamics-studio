@@ -24,7 +24,7 @@ import { parseLinkNames } from '../utils/urdf-base-fixture';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_ARM_URDF = readFileSync(
-  join(__dirname, '../../public/robots/test_arm.urdf'),
+  join(__dirname, '../fixtures/simple_test_arm.urdf'),
   'utf-8',
 );
 

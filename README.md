@@ -17,7 +17,7 @@
 | 能力 | 说明 |
 |------|------|
 | URDF / ZIP 导入 | 上传 `.urdf` 或含 mesh 的 `.zip`，写入 MuJoCo VFS 后加载 |
-| 内置 test_arm | 一键加载 `public/robots/test_arm.urdf`（无 mesh，适合 CI） |
+| 内置 test_arm | 一键加载 kuavo `biped_v3_arm`（`public/robots/test_arm.zip`，含 STL mesh） |
 | 3D 可视化 | Three.js + urdf-loader 实时显示关节状态 |
 | 动力学仿真 | `mj_step` 积分，`mj_inverse` 前馈 + PD 反馈 |
 | 关节角目标 | 平滑插值到达目标角，自动停止 |
@@ -83,7 +83,7 @@ npm run test:watch  # 监听模式
 
 本机手动发布：`npm run build` 后执行 `npx wrangler deploy`（首次需 `npx wrangler login`）。
 
-> 默认 biped 模型的 STL 在开发环境通过本机 `/biped-assets` 提供；线上请用「加载 test_arm」或上传 `public/robots/test_arm.zip` 测试。
+> 线上默认加载 `test_arm`（`public/robots/test_arm.zip`，源自 kuavo `biped_s56` 的 `biped_v3_arm.urdf` + STL mesh）；开发环境默认 `biped_s70_upper_body`（依赖本机 `/biped-assets`）。重新打包：`npm run package:test-arm-zip`（源路径见脚本 `BIPED_S56_ROOT`）。
 
 ## 项目结构
 

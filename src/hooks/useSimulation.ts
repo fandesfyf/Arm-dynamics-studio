@@ -15,6 +15,7 @@ import { useSessionStore, type RobotInfo } from '../stores/session-store';
 import type { ControlUiPreserve } from '../stores/session-store';
 import type { PayloadRecord, Wrench6 } from '../core/payload-editor';
 import { loadDefaultBipedUpperBody, loadDefaultBipedMeshes } from '../utils/biped-default-loader';
+import { loadBundledTestArm } from '../utils/test-arm-loader';
 import { detectEndEffectorLink, ensureFixedBase, parseLinkNames, resolveEndEffectorJointName } from '../utils/urdf-base-fixture';
 import { prepareUrdfForMujocoLoad } from '../utils/urdf-sanitize';
 import { releaseActiveMujocoHandles } from '../mujoco/loader';
@@ -1108,6 +1109,11 @@ export function useSimulation() {
     });
   }, [loadRobot]);
 
+  const loadTestArm = useCallback(async () => {
+    const bundle = await loadBundledTestArm();
+    await loadRobot(bundle.urdfText, bundle.urdfFileName, bundle.meshes, undefined, 'manual');
+  }, [loadRobot]);
+
   const applyBaseLink = useCallback(
     async (link: string) => {
       const urdf = useSessionStore.getState().urdfText;
@@ -1916,6 +1922,7 @@ export function useSimulation() {
   return {
     loadRobot,
     loadDefaultBiped,
+    loadTestArm,
     reloadUrdf,
     applyBaseLink,
     applyEndEffectorLink,

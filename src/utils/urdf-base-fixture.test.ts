@@ -10,7 +10,7 @@ import {
 } from './urdf-base-fixture';
 
 const testArm = readFileSync(
-  resolve(__dirname, '../../public/robots/test_arm.urdf'),
+  resolve(__dirname, '../fixtures/simple_test_arm.urdf'),
   'utf8',
 );
 

@@ -1423,52 +1423,6 @@ code {
   color: var(--color-text-primary);
 }
 
-.urdf-pick-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  max-height: 11rem;
-  margin: 0.5rem 0 0.65rem;
-  padding: 0.25rem;
-  overflow-y: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-primary);
-}
-
-.urdf-pick-item {
-  display: block;
-  width: 100%;
-  padding: 0.4rem 0.55rem;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-primary);
-  font-size: 0.76rem;
-  font-family: ui-monospace, 'Cascadia Code', monospace;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background var(--transition-fast),
-    border-color var(--transition-fast);
-}
-
-.urdf-pick-item:hover:not(:disabled) {
-  background: var(--color-bg-elevated);
-  border-color: var(--color-border-subtle);
-}
-
-.urdf-pick-item.active {
-  background: var(--color-accent-muted);
-  border-color: var(--color-accent);
-  color: var(--color-text-accent);
-}
-
-.urdf-pick-item:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 /* ── Studio layout (dock sidebars) ─────────────────── */
 .app-studio {
   display: flex;
