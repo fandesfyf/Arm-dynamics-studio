@@ -1789,6 +1789,27 @@ export function useSimulation() {
     setSimStatus('ready', `已导出 ${state.motionTargets.length} 个运动目标`);
   }, [setSimStatus]);
 
+  const enrichMotionTargetsFk = useCallback(
+    (targets: MotionTarget[]): MotionTarget[] => {
+      const state = useSessionStore.getState();
+      return targets.map((t) => {
+        const eePose = computeEePoseFromJoints(t.jointPositions);
+        const eeSceneWorld = computeEeSceneWorldFromJoints(
+          t.jointPositions,
+          state.endEffectorLink,
+        );
+        if (!eePose || !eeSceneWorld) return t;
+        return {
+          ...t,
+          eePosition: eePose.pos,
+          eeQuaternion: eePose.quat,
+          eeSceneWorld,
+        };
+      });
+    },
+    [computeEePoseFromJoints, computeEeSceneWorldFromJoints],
+  );
+
   const importMotionTargetsCsv = useCallback(
     async (file: File) => {
       const state = useSessionStore.getState();
@@ -1799,15 +1820,16 @@ export function useSimulation() {
       try {
         const text = await file.text();
         const { targets, warnings } = parseMotionTargetsCsv(text, state.robotInfo.jointNames);
-        useSessionStore.getState().setMotionTargets(targets);
+        const enriched = enrichMotionTargetsFk(targets);
+        useSessionStore.getState().setMotionTargets(enriched);
         const warnHint =
           warnings.length > 0 ? `（${warnings.slice(0, 2).join('；')}）` : '';
-        setSimStatus('ready', `已导入 ${targets.length} 个运动目标${warnHint}`);
+        setSimStatus('ready', `已导入 ${enriched.length} 个运动目标${warnHint}`);
       } catch (e) {
         setSimStatus('error', e instanceof Error ? e.message : String(e));
       }
     },
-    [setSimStatus],
+    [enrichMotionTargetsFk, setSimStatus],
   );
 
   const dispose = useCallback(() => {

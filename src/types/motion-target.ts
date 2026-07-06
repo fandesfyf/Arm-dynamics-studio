@@ -4,7 +4,7 @@ export type InterpProfile = 'linear' | 'cubic';
 
 export type MotionTargetSource = 'joint' | 'ee';
 
-/** 插值队列中的一帧目标（执行时统一在关节空间插值） */
+/** 插值队列中的一帧目标（执行时在关节空间插值；ee* 为 FK 缓存，供界面与标记显示） */
 export interface MotionTarget {
   id: string;
   source: MotionTargetSource;

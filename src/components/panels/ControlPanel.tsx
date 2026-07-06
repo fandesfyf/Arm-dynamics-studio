@@ -310,8 +310,8 @@ export function ControlPanel({
                 {motionTargets.map((mt, i) => (
                   <li key={mt.id}>
                     <span className="motion-target-label">
-                      #{i + 1} · {mt.source === 'ee' ? '末端' : '关节'} · [
-                      {mt.eePosition.map((v) => v.toFixed(2)).join(', ')}]
+                      #{i + 1} · 末端 [
+                      {mt.eePosition.map((v) => v.toFixed(3)).join(', ')}]
                     </span>
                     <button
                       type="button"
